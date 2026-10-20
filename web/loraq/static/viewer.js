@@ -1,0 +1,397 @@
+/* LoRaQ web display viewer. Polls the server snapshot and renders it like a LoRaQ receiver. */
+(function () {
+  'use strict';
+
+  var COLOURS = { W: '#ffffff', R: '#ff1e1e', G: '#1eff1e', Y: '#ffe600', B: '#00a0ff', O: '#ff8200' };
+  var FLASH_MS = 2000;
+  var FLASH_HZ = 3;
+  var EFFECT_PLAY_WINDOW_MS = 8000;   // effects older than this when first seen are not replayed
+  var REPORTER_STALE_MS = 120000;     // pushers heartbeat every ~30 s
+  var OFFLINE_AFTER_MS = 15000;
+  var POLL_VISIBLE_MS = 1000;
+  var POLL_HIDDEN_MS = 5000;
+
+  var body = document.body;
+  var key = body.getAttribute('data-key');
+  var api = body.getAttribute('data-api');
+  var $ = function (id) { return document.getElementById(id); };
+  var el = {
+    screen: $('screen'), status: $('status'), source: $('source'), sound: $('sound'), fullscreen: $('fullscreen'),
+    area1: $('area1'), a1text: $('a1-text'), a1timer: $('a1-timer'),
+    area2: $('area2'), a2text: $('a2-text'), a2timer: $('a2-timer'), prompt: $('sound-prompt')
+  };
+
+  // ---------- Clock sync: server_ms ~= performance.now() + offset ----------
+  var samples = [];
+  var offset = null;
+
+  function addClockSample(serverNow, t0, t1) {
+    var rtt = t1 - t0;
+    samples.push({ rtt: rtt, off: serverNow + rtt / 2 - t1 });
+    if (samples.length > 15) samples.shift();
+    var best = samples[0];
+    for (var i = 1; i < samples.length; i++) if (samples[i].rtt < best.rtt) best = samples[i];
+    offset = best.off;
+  }
+
+  function serverNow() {
+    return offset === null ? Date.now() : performance.now() + offset;
+  }
+
+  // ---------- Layout ----------
+  var layout = { W: 0, H: 0, portrait: false, a1min: 12, a1max: 48 };
+  var fitKey = '';
+
+  function px(v) { return Math.round(v) + 'px'; }
+
+  function applyLayout() {
+    var W = el.screen.clientWidth || window.innerWidth;
+    var H = el.screen.clientHeight || window.innerHeight;
+    if (W === layout.W && H === layout.H) return;
+    var portrait = H > W * 1.1;
+    var compact = !portrait && H < 420;
+    var bar = Math.min(56, Math.max(44, H * 0.065));
+    var panel = H * (portrait ? 0.30 : 0.235);
+    var a2 = portrait ? Math.min(H * 0.06, W * 0.085) : H * 0.078;
+    var style = document.documentElement.style;
+    style.setProperty('--W', px(W));
+    style.setProperty('--H', px(H));
+    style.setProperty('--bar', px(bar));
+    style.setProperty('--panel', px(panel));
+    style.setProperty('--a2', px(a2));
+    style.setProperty('--a2label', px(Math.max(10, H * (portrait ? 0.024 : 0.035))));
+    body.classList.toggle('portrait', portrait);
+    body.classList.toggle('compact', compact);
+    layout = { W: W, H: H, portrait: portrait,
+               a1min: Math.max(12, H * 0.035), a1max: Math.max(14, portrait ? Math.min(H * 0.18, W * 0.2) : H * 0.18) };
+    fitKey = '';
+    fitArea1();
+  }
+
+  function a1Fits() {
+    return el.a1text.scrollWidth <= el.a1text.clientWidth + 1 && el.area1.scrollHeight <= el.area1.clientHeight + 1;
+  }
+
+  // Largest font that fits, preferring whole-word wrapping, then allowing breaks inside words.
+  function fitArea1() {
+    var key = [layout.W, layout.H, el.a1text.textContent, !el.a1timer.hidden].join('|');
+    if (key === fitKey) return;
+    fitKey = key;
+    var passes = [false, true];
+    for (var p = 0; p < passes.length; p++) {
+      el.a1text.classList.toggle('break-any', passes[p]);
+      var lo = Math.floor(layout.a1min), hi = Math.floor(layout.a1max), best = 0;
+      while (lo <= hi) {
+        var mid = (lo + hi) >> 1;
+        el.area1.style.fontSize = mid + 'px';
+        if (a1Fits()) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+      }
+      if (best) { el.area1.style.fontSize = best + 'px'; return; }
+    }
+    el.area1.style.fontSize = Math.floor(layout.a1min) + 'px';
+  }
+
+  // ---------- Rendering ----------
+  var snap = null;
+  var flash = null;   // {until: perf ms, start: perf ms, colour}
+  var lastEffectId = null;
+  var firstSnapshot = true;
+  var visibleSince = document.hidden ? null : performance.now();
+
+  function fmt(seconds) {
+    var m = Math.floor(seconds / 60), s = seconds % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function remaining(zone) {
+    // Matches the receiver: duration - whole seconds elapsed, never below zero.
+    return Math.max(0, Math.ceil((zone.ends_at - serverNow()) / 1000));
+  }
+
+  function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  function renderZones() {
+    var z1 = snap && snap.zones && snap.zones['1'];
+    var z2 = snap && snap.zones && snap.zones['2'];
+
+    var t1 = z1 ? z1.text : '';
+    el.area1.style.color = COLOURS[(z1 && z1.colour) || 'W'];
+    setText(el.a1text, t1);
+    var has1 = !!(z1 && z1.ends_at !== null && z1.ends_at !== undefined);
+    if (el.a1timer.hidden === has1) el.a1timer.hidden = !has1;
+    if (has1) setText(el.a1timer, fmt(remaining(z1)));
+    fitArea1();
+
+    var show2 = !!(z2 && z2.text);
+    if (show2) {
+      el.area2.style.color = COLOURS[z2.colour] || COLOURS.W;
+      var t2 = z2.text.replace(/\s*\n\s*/g, ' ');
+      setText(el.a2text, t2);
+      var has2 = z2.ends_at !== null && z2.ends_at !== undefined;
+      if (el.a2timer.hidden === has2) el.a2timer.hidden = !has2;
+      if (has2) setText(el.a2timer, fmt(remaining(z2)));
+    }
+    el.area2.classList.toggle('shown', show2);
+  }
+
+  function renderFlash(now) {
+    var on = false;
+    if (flash) {
+      if (now >= flash.until) {
+        flash = null;
+      } else {
+        on = Math.floor((now - flash.start) / 1000 * FLASH_HZ * 2) % 2 === 0;
+      }
+    }
+    if (on) body.style.setProperty('--flash', COLOURS[flash.colour] || COLOURS.W);
+    body.classList.toggle('strobe', on);
+  }
+
+  function frame() {
+    renderZones();
+    renderFlash(performance.now());
+    requestAnimationFrame(frame);
+  }
+
+  function handleEffect(effect) {
+    if (!effect) {
+      // Server clears the effect when Area 1 is cleared; stop any running flash.
+      flash = null;
+      lastEffectId = null;
+      return;
+    }
+    if (effect.id === lastEffectId) return;
+    lastEffectId = effect.id;
+    if (firstSnapshot || serverNow() - effect.at > EFFECT_PLAY_WINDOW_MS) return;
+    if (effect.flash) flash = { start: performance.now(), until: performance.now() + FLASH_MS, colour: effect.colour };
+    if (effect.sound && !document.hidden && visibleSince !== null && offset !== null
+            && effect.at >= visibleSince + offset) playSound(effect.sound);
+  }
+
+  // ---------- Status ----------
+  var lastOk = 0;
+  var failures = 0;
+
+  function setStatus(cls, label, title) {
+    el.status.className = 'pill ' + cls;
+    setText(el.status, label);
+    el.status.title = title || '';
+  }
+
+  function updateStatus() {
+    var now = performance.now();
+    if (failures > 0 && (!lastOk || now - lastOk > OFFLINE_AFTER_MS)) {
+      setStatus('pill-off', 'OFFLINE', 'Cannot reach the server. Timers keep running from the last update.');
+    } else if (failures > 0) {
+      setStatus('pill-wait', 'RECONNECTING', 'Retrying the server');
+    } else if (!snap) {
+      setStatus('pill-wait', 'CONNECTING');
+    } else {
+      var newest = 0, names = [];
+      (snap.reporters || []).forEach(function (r) {
+        newest = Math.max(newest, r.last_seen);
+        if (serverNow() - r.last_seen <= REPORTER_STALE_MS) names.push(r.name);
+      });
+      if (!newest || serverNow() - newest > REPORTER_STALE_MS) {
+        setStatus('pill-stale', 'NO SIGNAL', 'No transmitter or receiver has contacted the server recently');
+      } else {
+        setStatus('pill-live', 'LIVE', 'Connected via: ' + names.join(', '));
+      }
+    }
+    var src = snap && snap.source ? 'TX: ' + snap.source.station : '';
+    setText(el.source, src);
+  }
+
+  // ---------- Polling ----------
+  var pollTimer = null;
+  var dead = false;
+
+  function showMessage(text) {
+    var m = document.createElement('div');
+    m.className = 'message';
+    m.textContent = text;
+    el.screen.appendChild(m);
+  }
+
+  function schedulePoll(ms) {
+    clearTimeout(pollTimer);
+    if (!dead) pollTimer = setTimeout(poll, ms);
+  }
+
+  function pollInterval() {
+    return document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS;
+  }
+
+  function poll() {
+    var url = api + '?k=' + encodeURIComponent(key) + (snap ? '&v=' + snap.v : '');
+    var controller = window.AbortController ? new AbortController() : null;
+    var timeout = setTimeout(function () { if (controller) controller.abort(); }, 8000);
+    var t0 = performance.now();
+    fetch(url, { cache: 'no-store', credentials: 'omit', signal: controller ? controller.signal : undefined })
+      .then(function (res) {
+        if (res.status === 404) {
+          dead = true;
+          showMessage('This display link is not valid.');
+          throw new Error('unknown show');
+        }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var t1 = performance.now();
+        if (typeof data.now === 'number') addClockSample(data.now, t0, t1);
+        if (!data.same) {
+          snap = data;
+          if (data.title && document.title !== data.title) document.title = data.title;
+          handleEffect(data.effect);
+          firstSnapshot = false;
+        }
+        lastOk = t1;
+        failures = 0;
+        updateStatus();
+        schedulePoll(pollInterval());
+      })
+      .catch(function () {
+        if (dead) return;
+        failures++;
+        updateStatus();
+        schedulePoll(Math.min(10000, 1000 * Math.pow(2, Math.min(failures - 1, 4))));
+      })
+      .then(function () { clearTimeout(timeout); });
+  }
+
+  // ---------- Sound (Web Audio, same tones as loraq_audio.py) ----------
+  var audio = null;
+  var soundOn = false;
+  var PREF = 'loraq-sound';
+
+  function getPref() {
+    try { return localStorage.getItem(PREF); } catch (e) { return null; }
+  }
+  function setPref(v) {
+    try { localStorage.setItem(PREF, v); } catch (e) { /* private mode */ }
+  }
+
+  function ensureAudio() {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    if (!audio) audio = new Ctx();
+    if (audio.state === 'suspended') audio.resume();
+    return audio;
+  }
+
+  function tone(ctx, start, freq, dur, type, level) {
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    var ramp = 0.005;
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, start);
+    gain.gain.linearRampToValueAtTime(level, start + ramp);
+    gain.gain.setValueAtTime(level, start + dur - ramp);
+    gain.gain.linearRampToValueAtTime(0, start + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + dur + 0.02);
+  }
+
+  function playSound(name) {
+    if (!soundOn || !audio || audio.state !== 'running') return;
+    var t = audio.currentTime + 0.02;
+    if (name === 'buzzer') tone(audio, t, 220, 0.6, 'square', 0.25);
+    else if (name === 'beep') tone(audio, t, 1000, 0.2, 'sine', 0.6);
+    else if (name === 'double-beep') { tone(audio, t, 1000, 0.15, 'sine', 0.6); tone(audio, t + 0.25, 1000, 0.15, 'sine', 0.6); }
+  }
+
+  function updateSoundUi() {
+    el.sound.setAttribute('aria-pressed', soundOn ? 'true' : 'false');
+    el.sound.title = soundOn ? 'Sound on' : 'Sound off';
+    var needsTap = getPref() === null || (soundOn && (!audio || audio.state !== 'running'));
+    el.prompt.hidden = !needsTap;
+  }
+
+  function enableSound(on) {
+    soundOn = on;
+    setPref(on ? 'on' : 'off');
+    if (on && ensureAudio()) {
+      // A short silent tone unlocks audio on iOS.
+      tone(audio, audio.currentTime, 1000, 0.02, 'sine', 0.0001);
+    }
+    updateSoundUi();
+  }
+
+  el.sound.addEventListener('click', function (e) { e.stopPropagation(); enableSound(!soundOn); });
+  el.prompt.addEventListener('click', function (e) { e.stopPropagation(); enableSound(true); });
+  // Browsers only allow audio after a user gesture, so a remembered "on" resumes on the first tap.
+  // A first tap anywhere other than the prompt means "no sound" (the Sound button can change it later).
+  document.addEventListener('pointerdown', function (e) {
+    if (getPref() === null && !el.prompt.contains(e.target) && !el.sound.contains(e.target)) {
+      enableSound(false);
+      return;
+    }
+    if (soundOn && (!audio || audio.state !== 'running')) { ensureAudio(); setTimeout(updateSoundUi, 100); }
+  });
+  soundOn = getPref() === 'on';
+  updateSoundUi();
+
+  // ---------- Fullscreen and wake lock ----------
+  var fsEnabled = document.fullscreenEnabled || document.webkitFullscreenEnabled;
+  function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+  function toggleFullscreen() {
+    if (!fsEnabled) return;
+    if (isFullscreen()) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      var root = document.documentElement;
+      var req = root.requestFullscreen || root.webkitRequestFullscreen;
+      var p = req.call(root, { navigationUI: 'hide' });
+      if (p && p.catch) p.catch(function () {});
+    }
+  }
+  function updateFsUi() {
+    el.fullscreen.setAttribute('aria-pressed', isFullscreen() ? 'true' : 'false');
+    el.fullscreen.title = isFullscreen() ? 'Exit full screen' : 'Full screen';
+  }
+  if (fsEnabled) {
+    el.fullscreen.hidden = false;
+    el.fullscreen.addEventListener('click', function (e) { e.stopPropagation(); toggleFullscreen(); });
+    el.screen.addEventListener('dblclick', toggleFullscreen);
+    document.addEventListener('fullscreenchange', updateFsUi);
+    document.addEventListener('webkitfullscreenchange', updateFsUi);
+    updateFsUi();
+  }
+
+  var wakeLock = null;
+  function requestWakeLock() {
+    if (!('wakeLock' in navigator) || document.hidden || wakeLock) return;
+    navigator.wakeLock.request('screen').then(function (lock) {
+      wakeLock = lock;
+      lock.addEventListener('release', function () { wakeLock = null; });
+    }).catch(function () {});
+  }
+
+  document.addEventListener('pointerdown', requestWakeLock);
+
+  document.addEventListener('visibilitychange', function () {
+    visibleSince = document.hidden ? null : performance.now();
+    if (!document.hidden) {
+      requestWakeLock();
+      schedulePoll(0);
+    }
+  });
+  window.addEventListener('pageshow', function () {
+    visibleSince = document.hidden ? null : performance.now();
+  });
+
+  // ---------- Start ----------
+  if (window.ResizeObserver) new ResizeObserver(applyLayout).observe(el.screen);
+  window.addEventListener('resize', applyLayout);
+  window.addEventListener('orientationchange', function () { setTimeout(applyLayout, 200); });
+  applyLayout();
+  requestWakeLock();
+  setInterval(updateStatus, 5000);
+  requestAnimationFrame(frame);
+  poll();
+})();

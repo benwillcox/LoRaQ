@@ -1,0 +1,1 @@
+root=PARTUUID=9a5f3665-02 rootfstype=ext4 rootwait fsck.repair=yes net.ifnames=0 logo.nologo console=tty1 video=HDMI-A-1:800x480@60e consoleblank=0

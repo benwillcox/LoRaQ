@@ -1,0 +1,285 @@
+/* LoRaQ web display. Sizes are driven by CSS variables set from viewer.js (--H, --bar, --panel, ...). */
+:root {
+  --area1-bg: #441a52;
+  --panel-bg: #26334a;
+  --bg: var(--area1-bg);
+  --H: 100vh;
+  --bar: 44px;
+  --panel: 24vh;
+  --a1: 48px;
+  --a2: 32px;
+  --a2label: 14px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: #fff;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+
+body {
+  font-family: "FreeSans", "Liberation Sans", "Helvetica Neue", Arial, Helvetica, sans-serif;
+  font-weight: 700;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.screen {
+  position: fixed;
+  inset: 0;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ---- Status bar ---- */
+.bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  height: calc(var(--bar) + var(--safe-t));
+  padding: var(--safe-t) calc(8px + var(--safe-r)) 0 calc(8px + var(--safe-l));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  background: #000;
+  font-size: clamp(12px, calc(var(--bar) * 0.36), 18px);
+  line-height: 1;
+}
+
+.bar-left { justify-self: start; width: max-content; }
+.bar-mid {
+  justify-self: center;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #ddd;
+}
+.bar-right {
+  justify-self: end;
+  display: flex;
+  gap: 6px;
+  width: max-content;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.25em 0.6em;
+  border-radius: 999px;
+  font-size: 0.85em;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  color: #000;
+}
+.pill-live { background: #51ccd9; }
+.pill-wait { background: #ffe600; }
+.pill-stale { background: #ff8200; }
+.pill-off { background: #ff1e1e; color: #fff; }
+
+.btn {
+  font: inherit;
+  font-size: 0.85em;
+  color: #fff;
+  background: #222;
+  border: 1px solid #666;
+  border-radius: 6px;
+  padding: 10px;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn[aria-pressed="true"] { background: #26334a; border-color: #ffc857; }
+.btn:focus-visible { outline: 2px solid #00a0ff; outline-offset: 1px; }
+.btn[hidden] { display: none; }
+.btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn .icon-on, .btn[aria-pressed="true"] .icon-off { display: none; }
+.btn[aria-pressed="true"] .icon-on { display: inline; }
+
+/* ---- Area 1 ---- */
+.area1 {
+  position: absolute;
+  z-index: 1;
+  top: calc(var(--bar) + var(--safe-t) + var(--H) * 0.03);
+  bottom: calc(var(--panel) + var(--safe-b) + var(--H) * 0.02);
+  left: var(--safe-l);
+  right: var(--safe-r);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  overflow: hidden;
+  font-size: var(--a1);
+  line-height: 1.12;
+}
+
+.a1-text {
+  width: 92%;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+.a1-text.break-any { overflow-wrap: anywhere; word-break: break-word; }
+
+.timer {
+  font-variant-numeric: tabular-nums;
+  border: 2px solid currentColor;
+  border-radius: 6px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.a1-timer {
+  margin-top: 0.25em;
+  padding: 0.04em 0.3em;
+}
+
+/* ---- Area 2 panel ---- */
+.area2 {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--panel) + var(--safe-b));
+  padding: 0 calc(12px + var(--safe-r)) var(--safe-b) calc(12px + var(--safe-l));
+  background: var(--panel-bg);
+  border-top: 2px solid currentColor;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(105%);
+  transition: transform 0.3s ease-in, visibility 0s linear 0.3s;
+  visibility: hidden;
+}
+.area2.shown {
+  transform: translateY(0);
+  transition: transform 0.3s ease-out, visibility 0s;
+  visibility: visible;
+}
+
+.a2-label {
+  flex: none;
+  text-align: center;
+  font-size: var(--a2label);
+  padding-top: calc(var(--a2label) * 0.4);
+  line-height: 1.1;
+}
+
+.a2-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: var(--a2);
+  line-height: 1.15;
+}
+
+.a2-text {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.a2-timer {
+  flex: none;
+  padding: 0.08em 0.3em;
+}
+
+/* Portrait (phones): stack the Area 2 timer under a two-line cue. */
+.portrait .a2-row {
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.2em;
+}
+.portrait .a2-text {
+  flex: none;
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* Short landscape screens (phones on their side). */
+.compact .a1-timer { margin-top: 0.15em; }
+
+/* ---- Flash ---- */
+.strobe .screen { background: var(--flash, #fff); }
+.strobe .area1, .strobe .area2 { color: #000 !important; }
+.strobe .area2 { background: #000; border-top-color: #000; }
+
+/* ---- Overlays ---- */
+.sound-prompt {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: calc(var(--panel) + var(--safe-b) + 12px);
+  transform: translateX(-50%);
+  max-width: 92%;
+  white-space: nowrap;
+  font: inherit;
+  font-size: max(15px, min(calc(var(--H) * 0.035), 5vw));
+  padding: 0.7em 1.2em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.82);
+  border: 2px solid #fff;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.message {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2em;
+  text-align: center;
+  background: #000;
+  font-size: max(18px, calc(var(--H) * 0.04));
+}
+
+.noscript {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .area2, .area2.shown { transition: none; }
+}
