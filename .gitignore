@@ -1,0 +1,21 @@
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local overrides (per-machine LoRaQ config pointed at by $LORAQ_CONFIG)
+*.local.ini
+
+# Packaged applications
+build/
+dist/

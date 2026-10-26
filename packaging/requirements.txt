@@ -1,0 +1,4 @@
+pyinstaller
+pyserial
+python-osc
+pygame-ce

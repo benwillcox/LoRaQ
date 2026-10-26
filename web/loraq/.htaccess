@@ -1,0 +1,28 @@
+# LoRaQ web display (Apache 2.4 + PHP 8). Requires AllowOverride FileInfo (mod_rewrite).
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Pass the Authorization header through to PHP (stripped by default under CGI/FastCGI).
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Optional: force HTTPS for the viewer. Pushers should be configured with an https:// url
+    # directly, because a redirect turns their POST into a GET.
+    # RewriteCond %{HTTPS} !=on
+    # RewriteCond %{REQUEST_METHOD} =GET
+    # RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    RewriteRule ^app(/|$) - [F,L]
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L,QSA]
+</IfModule>
+
+# Without mod_rewrite, use URLs like .../loraq/index.php/v/<view_key> and set the pusher
+# url to .../loraq/index.php (app/.htaccess still protects the config).
+
+<FilesMatch "\.(json|lock|tmp|md)$">
+    Require all denied
+</FilesMatch>

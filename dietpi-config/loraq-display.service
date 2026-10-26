@@ -1,0 +1,14 @@
+[Unit]
+Description=LoRaQ Cue Display Engine
+After=multi-user.target
+
+[Service]
+Type=simple
+User=loraq
+WorkingDirectory=/home/loraq
+ExecStart=/home/loraq/LoRaQ-display
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
