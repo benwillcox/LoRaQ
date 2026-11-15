@@ -18,6 +18,8 @@ return [
         // The array key is the show id (A-Z a-z 0-9 _ -). Add more entries to host several shows.
         'main' => [
             'title' => 'LoRaQ Show',
+            // Optional home-screen / launcher name. Defaults to title.
+            'app_name' => 'LoRaQ Show',
             'view_key' => 'CHANGE-ME-to-a-long-random-string',
             'push_tokens' => [
                 'tx-main' => 'CHANGE-ME-token-for-main-transmitter',

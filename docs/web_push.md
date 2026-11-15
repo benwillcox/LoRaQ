@@ -28,6 +28,7 @@ In the uploaded `loraq/app` folder, copy `config.sample.php` to `config.php` and
 |---|---|
 | `data_dir` | A folder where PHP can save the display state. See permissions below. |
 | `title` | Your show name, displayed at the top of the viewer. |
+| `app_name` | Optional home-screen / launcher name for this show. Defaults to `title`. |
 | `view_key` | A random private key, **20-128 characters** long. This becomes part of the viewer link. |
 | `push_tokens` | A separate random token for each device sending cues, **16-128 characters** long. Names such as `tx-main` identify the device in the viewer. Remove any unused sample entries. |
 
@@ -64,10 +65,11 @@ The viewer link is the password: share it only with people who should see the cu
 
 ## Using the display
 
-* **Sound:** Tap to enable sound when prompted, or use the speaker button. Browsers require interaction before playing alerts.
-* **Keep the screen on:** Where supported, the viewer requests that the screen stays awake. For a full-screen display on a phone, add the viewer to the home screen (below).
-* **Phone home screen:** On Android, use Chrome's **Install** or **Add to Home screen** option. On iPhone, open the link in Safari and choose **Share > Add to Home Screen**, enabling **Open as Web App** if offered.
-* **Connection status:** `LIVE` means connected; `RECONNECTING` or `OFFLINE` means the viewer has lost contact with the server. `NO SIGNAL` means the server has not heard from a LoRaQ device for two minutes. Tap the status pill to list the devices heard in the last hour, when each was last heard, and which transmitter sent the latest cue.
+* **Share:** On browsers that support native sharing, tap the share button to send the private viewer link. Anyone who receives the link can view the show, so share it only with trusted people.
+* **Sound:** Use the speaker button to turn alert sounds on or off. Browsers require interaction before playing alerts.
+* **Keep the screen on:** Where supported, the viewer requests that the screen stays awake. Add it to the home screen for an app-style display (below).
+* **Phone home screen:** On Android, use Chrome's **Install** or **Add to Home screen** option; the system navigation bar remains available. On iPhone, open the link in Safari and choose **Share > Add to Home Screen**, enabling **Open as Web App** if offered. The installed name comes from `app_name` (or `title` if omitted); the phone may need the saved web app re-added after a name change. iOS home-screen web apps don't show Safari's navigation toolbar; open the link in Safari to keep its controls visible.
+* **Connection status:** `LIVE` means connected; `RECONNECTING` or `OFFLINE` means the viewer has lost contact with the server. `NO UPDATE` means the server has not heard from a LoRaQ device for two minutes. Tap the status pill to list the devices heard in the last hour, when each was last heard, and which transmitter sent the latest cue.
 * **Internet interruptions:** Devices retry queued cues automatically. Timers account for delivery delays, but stale flashes and sounds are not replayed. While offline, the viewer keeps counting down existing timers but cannot receive new cues.
 
 ## Troubleshooting
@@ -75,7 +77,7 @@ The viewer link is the password: share it only with people who should see the cu
 | Problem | What to check |
 |---|---|
 | Viewer link gives 404 or "not valid" | Check the URL and `view_key`. Replace all `CHANGE-ME` placeholders and use the required key length. |
-| Viewer says `NO SIGNAL` | Check the sending device's internet connection, `[web_push] enabled` setting and application logs. Restart the application after editing its configuration. |
+| Viewer says `NO UPDATE` | Check the sending device's internet connection, `[web_push] enabled` setting and application logs. Restart the application after editing its configuration. |
 | Device reports HTTP 401 | Its push token must exactly match an entry in `config.php`. |
 | Device reports HTTP 500 | Check that PHP can write to `data_dir` and that `config.php` has no editing errors. Ask the host to check the PHP error log. |
 | Device reports a certificate error | Check the site's HTTPS certificate and the sending device's date/time. On a Pi, allow time for its clock to synchronise after boot. |

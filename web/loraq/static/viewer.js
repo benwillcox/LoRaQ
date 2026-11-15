@@ -17,11 +17,11 @@
   var api = body.getAttribute('data-api');
   var $ = function (id) { return document.getElementById(id); };
   var el = {
-    screen: $('screen'), status: $('status'), sound: $('sound'),
+    screen: $('screen'), status: $('status'), share: $('share'), sound: $('sound'),
     stations: $('stations'), stationsDetail: $('stations-detail'), stationsList: $('stations-list'),
     stationsLast: $('stations-last'),
     area1: $('area1'), a1text: $('a1-text'), a1timer: $('a1-timer'),
-    area2: $('area2'), a2text: $('a2-text'), a2timer: $('a2-timer'), prompt: $('sound-prompt')
+    area2: $('area2'), a2text: $('a2-text'), a2timer: $('a2-timer')
   };
 
   // ---------- Clock sync: server_ms ~= performance.now() + offset ----------
@@ -249,6 +249,16 @@
     if (e.key === 'Escape' && !el.stations.hidden) showStations(false);
   });
 
+  if (typeof navigator.share === 'function') {
+    el.share.hidden = false;
+    el.share.addEventListener('click', function (e) {
+      e.stopPropagation();
+      navigator.share({ title: document.title, url: window.location.href }).catch(function (error) {
+        if (error.name !== 'AbortError') console.error('Could not share the viewer link:', error);
+      });
+    });
+  }
+
   function updateStatus() {
     var now = performance.now();
     if (failures > 0 && (!lastOk || now - lastOk > OFFLINE_AFTER_MS)) {
@@ -261,7 +271,7 @@
       var newest = 0;
       (snap.reporters || []).forEach(function (r) { newest = Math.max(newest, r.last_seen); });
       if (!newest || serverNow() - newest > REPORTER_STALE_MS) {
-        setStatus('pill-stale', 'NO SIGNAL', 'No transmitter or receiver has contacted the server recently.');
+        setStatus('pill-stale', 'NO UPDATE', 'No transmitter or receiver has contacted the server recently.');
       } else {
         setStatus('pill-live', 'LIVE', 'Cues are reaching the server via:');
       }
@@ -374,8 +384,6 @@
   function updateSoundUi() {
     el.sound.setAttribute('aria-pressed', soundOn ? 'true' : 'false');
     el.sound.title = soundOn ? 'Sound on' : 'Sound off';
-    var needsTap = getPref() === null || (soundOn && (!audio || audio.state !== 'running'));
-    el.prompt.hidden = !needsTap;
   }
 
   function enableSound(on) {
@@ -389,15 +397,9 @@
   }
 
   el.sound.addEventListener('click', function (e) { e.stopPropagation(); enableSound(!soundOn); });
-  el.prompt.addEventListener('click', function (e) { e.stopPropagation(); enableSound(true); });
   // Browsers only allow audio after a user gesture, so a remembered "on" resumes on the first tap.
-  // A first tap anywhere other than the prompt means "no sound" (the Sound button can change it later).
-  document.addEventListener('pointerdown', function (e) {
-    if (getPref() === null && !el.prompt.contains(e.target) && !el.sound.contains(e.target)) {
-      enableSound(false);
-      return;
-    }
-    if (soundOn && (!audio || audio.state !== 'running')) { ensureAudio(); setTimeout(updateSoundUi, 100); }
+  document.addEventListener('pointerdown', function () {
+    if (soundOn && (!audio || audio.state !== 'running')) ensureAudio();
   });
   soundOn = getPref() === 'on';
   updateSoundUi();

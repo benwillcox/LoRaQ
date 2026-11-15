@@ -121,7 +121,9 @@ function handle_state(): void
 function render_viewer(string $show, string $key): void
 {
     $base = loraq_base_path();
-    $title = loraq_html(loraq_config()['shows'][$show]['title']);
+    $showConfig = loraq_config()['shows'][$show];
+    $title = loraq_html($showConfig['title']);
+    $appName = loraq_html($showConfig['app_name']);
     $asset = function (string $name) use ($base): string {
         $file = __DIR__ . "/static/$name";
         return loraq_html($base . "static/$name?" . (is_file($file) ? filemtime($file) : 0));
@@ -142,6 +144,7 @@ function render_viewer(string $show, string $key): void
 <meta name="theme-color" content="#091b58">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{$appName}">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>{$title}</title>
 <link rel="manifest" href="{$manifest}">
@@ -155,6 +158,14 @@ function render_viewer(string $show, string $key): void
   <div id="bar" class="bar">
     <div class="bar-left"><button id="status" class="pill pill-wait" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="stations">CONNECTING</button></div>
     <div class="bar-right">
+      <button id="share" class="btn" type="button" aria-label="Share display link" title="Share display link" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="18" cy="5" r="3"/>
+          <circle cx="6" cy="12" r="3"/>
+          <circle cx="18" cy="19" r="3"/>
+          <path d="m8.6 10.5 6.8-4m-6.8 7.5 6.8 4"/>
+        </svg>
+      </button>
       <button id="sound" class="btn" type="button" aria-label="Sound" aria-pressed="false" title="Sound off">
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
           <path d="M11 4 6 8H3v8h3l5 4Z"/>
@@ -180,7 +191,6 @@ function render_viewer(string $show, string $key): void
       <div id="a2-timer" class="timer a2-timer" hidden></div>
     </div>
   </div>
-  <button id="sound-prompt" class="sound-prompt" type="button" hidden>Tap to enable sound</button>
   <noscript><div class="noscript">This display needs JavaScript.</div></noscript>
 </div>
 </body>
@@ -194,11 +204,11 @@ function render_manifest(string $show, string $key): void
     $base = loraq_base_path();
     header('Content-Type: application/manifest+json; charset=utf-8');
     echo json_encode([
-        'name' => loraq_config()['shows'][$show]['title'],
-        'short_name' => 'LoRaQ',
+        'name' => loraq_config()['shows'][$show]['app_name'],
+        'short_name' => loraq_config()['shows'][$show]['app_name'],
         'start_url' => $base . "v/$key",
         'scope' => $base . "v/$key",
-        'display' => 'fullscreen',
+        'display' => 'standalone',
         'background_color' => '#091b58',
         'theme_color' => '#091b58',
         'icons' => [

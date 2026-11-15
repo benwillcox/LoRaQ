@@ -36,7 +36,14 @@ function loraq_config(): array
                     error_log("LoRaQ: push token for '$reporter' in show '$id' ignored (needs 16+ random characters)");
                 }
             }
-            $shows[$id] = ['title' => (string) ($show['title'] ?? 'LoRaQ'), 'view_key' => $key, 'push_tokens' => $tokens];
+            $title = (string) ($show['title'] ?? 'LoRaQ');
+            $appName = trim((string) ($show['app_name'] ?? ''));
+            $shows[$id] = [
+                'title' => $title,
+                'app_name' => $appName !== '' ? $appName : $title,
+                'view_key' => $key,
+                'push_tokens' => $tokens,
+            ];
         }
         $config['shows'] = $shows;
     }

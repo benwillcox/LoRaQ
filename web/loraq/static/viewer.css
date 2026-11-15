@@ -273,25 +273,6 @@ body {
 .strobe .area1, .strobe .area2 { color: #000 !important; }
 .strobe .area2 { background: #000; border-top-color: #000; }
 
-/* ---- Overlays ---- */
-.sound-prompt {
-  position: absolute;
-  z-index: 4;
-  left: 50%;
-  bottom: calc(var(--panel) + var(--safe-b) + 12px);
-  transform: translateX(-50%);
-  max-width: 92%;
-  white-space: nowrap;
-  font: inherit;
-  font-size: max(15px, min(calc(var(--H) * 0.035), 5vw));
-  padding: 0.7em 1.2em;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.82);
-  border: 2px solid #fff;
-  border-radius: 12px;
-  cursor: pointer;
-}
-
 .message {
   position: absolute;
   z-index: 5;
