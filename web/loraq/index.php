@@ -124,6 +124,7 @@ function render_viewer(string $show, string $key): void
     $showConfig = loraq_config()['shows'][$show];
     $title = loraq_html($showConfig['title']);
     $appName = loraq_html($showConfig['app_name']);
+    $appleIcon = loraq_show_icon_asset($showConfig, 180);
     $asset = function (string $name) use ($base): string {
         $file = __DIR__ . "/static/$name";
         return loraq_html($base . "static/$name?" . (is_file($file) ? filemtime($file) : 0));
@@ -149,7 +150,7 @@ function render_viewer(string $show, string $key): void
 <title>{$title}</title>
 <link rel="manifest" href="{$manifest}">
 <link rel="icon" href="{$asset('icon.svg')}" type="image/svg+xml">
-<link rel="apple-touch-icon" href="{$asset('icon-180.png')}">
+<link rel="apple-touch-icon" sizes="180x180" href="{$asset($appleIcon)}">
 <link rel="stylesheet" href="{$asset('viewer.css')}">
 <script src="{$asset('viewer.js')}" defer></script>
 </head>
@@ -157,6 +158,7 @@ function render_viewer(string $show, string $key): void
 <div id="screen" class="screen">
   <div id="bar" class="bar">
     <div class="bar-left"><button id="status" class="pill pill-wait" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="stations">CONNECTING</button></div>
+    <div id="show-title" class="show-title" title="{$title}">{$title}</div>
     <div class="bar-right">
       <button id="share" class="btn" type="button" aria-label="Share display link" title="Share display link" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -202,19 +204,26 @@ HTML;
 function render_manifest(string $show, string $key): void
 {
     $base = loraq_base_path();
+    $showConfig = loraq_config()['shows'][$show];
+    $icon = function (int $size) use ($base, $showConfig): array {
+        $name = loraq_show_icon_asset($showConfig, $size);
+        $file = __DIR__ . "/static/$name";
+        return [
+            'src' => $base . "static/$name?" . filemtime($file),
+            'sizes' => $size . 'x' . $size,
+            'type' => 'image/png',
+        ];
+    };
     header('Content-Type: application/manifest+json; charset=utf-8');
     echo json_encode([
-        'name' => loraq_config()['shows'][$show]['app_name'],
-        'short_name' => loraq_config()['shows'][$show]['app_name'],
+        'name' => $showConfig['app_name'],
+        'short_name' => $showConfig['app_name'],
         'start_url' => $base . "v/$key",
         'scope' => $base . "v/$key",
         'display' => 'standalone',
         'background_color' => '#091b58',
         'theme_color' => '#091b58',
-        'icons' => [
-            ['src' => $base . 'static/icon-192.png', 'sizes' => '192x192', 'type' => 'image/png'],
-            ['src' => $base . 'static/icon-512.png', 'sizes' => '512x512', 'type' => 'image/png'],
-        ],
+        'icons' => [$icon(192), $icon(512)],
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }

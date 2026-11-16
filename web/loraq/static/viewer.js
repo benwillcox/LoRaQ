@@ -17,7 +17,7 @@
   var api = body.getAttribute('data-api');
   var $ = function (id) { return document.getElementById(id); };
   var el = {
-    screen: $('screen'), status: $('status'), share: $('share'), sound: $('sound'),
+    screen: $('screen'), status: $('status'), showTitle: $('show-title'), share: $('share'), sound: $('sound'),
     stations: $('stations'), stationsDetail: $('stations-detail'), stationsList: $('stations-list'),
     stationsLast: $('stations-last'),
     area1: $('area1'), a1text: $('a1-text'), a1timer: $('a1-timer'),
@@ -319,7 +319,11 @@
         if (typeof data.now === 'number') addClockSample(data.now, t0, t1);
         if (!data.same) {
           snap = data;
-          if (data.title && document.title !== data.title) document.title = data.title;
+          if (data.title) {
+            if (document.title !== data.title) document.title = data.title;
+            setText(el.showTitle, data.title);
+            el.showTitle.title = data.title;
+          }
           handleEffect(data.effect);
         }
         // An unchanged reply means nothing stale to swallow, so live effects can play from now on.

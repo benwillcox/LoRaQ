@@ -38,9 +38,15 @@ function loraq_config(): array
             }
             $title = (string) ($show['title'] ?? 'LoRaQ');
             $appName = trim((string) ($show['app_name'] ?? ''));
+            $icon = trim((string) ($show['icon'] ?? ''));
+            if ($icon !== '' && !preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $icon)) {
+                error_log("LoRaQ: icon for show '$id' ignored (use a 1-64 character filename stem)");
+                $icon = '';
+            }
             $shows[$id] = [
                 'title' => $title,
                 'app_name' => $appName !== '' ? $appName : $title,
+                'icon' => $icon,
                 'view_key' => $key,
                 'push_tokens' => $tokens,
             ];
@@ -48,6 +54,22 @@ function loraq_config(): array
         $config['shows'] = $shows;
     }
     return $config;
+}
+
+function loraq_show_icon_asset(array $show, int $size): string
+{
+    if (!in_array($size, [180, 192, 512], true)) {
+        throw new InvalidArgumentException('Unsupported show icon size');
+    }
+
+    $icon = $show['icon'] ?? '';
+    if (is_string($icon) && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $icon)) {
+        $custom = "show-icons/$icon-$size.png";
+        if (is_file(__DIR__ . '/../static/' . $custom)) {
+            return $custom;
+        }
+    }
+    return "icon-$size.png";
 }
 
 function loraq_find_view_key(string $key): ?string

@@ -29,6 +29,7 @@ In the uploaded `loraq/app` folder, copy `config.sample.php` to `config.php` and
 | `data_dir` | A folder where PHP can save the display state. See permissions below. |
 | `title` | Your show name, displayed at the top of the viewer. |
 | `app_name` | Optional home-screen / launcher name for this show. Defaults to `title`. |
+| `icon` | Optional icon filename stem. Upload `<stem>-180.png`, `<stem>-192.png` and `<stem>-512.png` to `static/show-icons/`; missing sizes use the default LoRaQ icon. |
 | `view_key` | A random private key, **20-128 characters** long. This becomes part of the viewer link. |
 | `push_tokens` | A separate random token for each device sending cues, **16-128 characters** long. Names such as `tx-main` identify the device in the viewer. Remove any unused sample entries. |
 
@@ -65,6 +66,7 @@ The viewer link is the password: share it only with people who should see the cu
 
 ## Using the display
 
+* **Show title:** The configured `title` appears centered in the top bar; long titles are shortened to fit.
 * **Share:** On browsers that support native sharing, tap the share button to send the private viewer link. Anyone who receives the link can view the show, so share it only with trusted people.
 * **Sound:** Use the speaker button to turn alert sounds on or off. Browsers require interaction before playing alerts.
 * **Keep the screen on:** Where supported, the viewer requests that the screen stays awake. Add it to the home screen for an app-style display (below).

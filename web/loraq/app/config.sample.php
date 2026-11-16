@@ -20,6 +20,9 @@ return [
             'title' => 'LoRaQ Show',
             // Optional home-screen / launcher name. Defaults to title.
             'app_name' => 'LoRaQ Show',
+            // Optional icon basename. Upload 180, 192 and 512 px PNGs to static/show-icons/.
+            // Missing sizes use the matching default LoRaQ icon.
+            'icon' => 'main',
             'view_key' => 'CHANGE-ME-to-a-long-random-string',
             'push_tokens' => [
                 'tx-main' => 'CHANGE-ME-token-for-main-transmitter',

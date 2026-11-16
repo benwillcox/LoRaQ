@@ -66,11 +66,21 @@ body {
   line-height: 1;
 }
 
-.bar-left { width: max-content; }
+.bar-left { flex: none; width: max-content; }
 .bar-right {
   display: flex;
+  flex: none;
   gap: 6px;
   width: max-content;
+}
+.show-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9em;
 }
 
 .pill {

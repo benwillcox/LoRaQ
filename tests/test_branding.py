@@ -1,5 +1,4 @@
 import importlib.util
-import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -199,11 +198,19 @@ class BrandingTests(unittest.TestCase):
 
     def test_manifest_icons_exist_at_the_declared_sizes(self):
         php = (ROOT / "web" / "loraq" / "index.php").read_text()
-        sizes = re.findall(r"static/icon-(\d+)\.png', 'sizes' => '(\d+)x(\d+)'", php)
-        self.assertEqual(len(sizes), 2)
-        for name, width, height in sizes:
-            image = pygame.image.load(str(ROOT / "web" / "loraq" / "static" / f"icon-{name}.png"))
-            self.assertEqual(image.get_size(), (int(width), int(height)))
+        self.assertIn("'icons' => [$icon(192), $icon(512)]", php)
+        self.assertIn("'sizes' => $size . 'x' . $size", php)
+        for size in (192, 512):
+            image = pygame.image.load(str(ROOT / "web" / "loraq" / "static" / f"icon-{size}.png"))
+            self.assertEqual(image.get_size(), (size, size))
+
+    def test_sample_custom_show_icons_have_required_sizes(self):
+        config = (ROOT / "web" / "loraq" / "app" / "config.sample.php").read_text()
+        self.assertIn("'icon' => 'main'", config)
+        icons = ROOT / "web" / "loraq" / "static" / "show-icons"
+        for size in (180, 192, 512):
+            image = pygame.image.load(str(icons / f"main-{size}.png"))
+            self.assertEqual(image.get_size(), (size, size))
 
 
 if __name__ == "__main__":
