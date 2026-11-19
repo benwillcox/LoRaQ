@@ -46,12 +46,11 @@ function handle_push(): void
     if ($length > LORAQ_MAX_BODY) {
         loraq_fail(413, 'Body too large');
     }
-    $auth = loraq_find_token(loraq_bearer_token());
-    if ($auth === null) {
+    $show = loraq_find_token(loraq_bearer_token(), loraq_config()['shows']);
+    if ($show === null) {
         usleep(200000);
         loraq_fail(401, 'Bad token');
     }
-    [$show, $reporter] = $auth;
     $raw = file_get_contents('php://input', false, null, 0, LORAQ_MAX_BODY + 1);
     if ($raw === false || strlen($raw) > LORAQ_MAX_BODY) {
         loraq_fail(413, 'Body too large');
@@ -59,6 +58,10 @@ function handle_push(): void
     $body = json_decode($raw, true, 16);
     if (!is_array($body)) {
         loraq_fail(400, 'Body must be a JSON object');
+    }
+    $reporter = $body['reporter'] ?? null;
+    if (!loraq_valid_station_id($reporter)) {
+        loraq_fail(400, 'Push requires a reporter Station ID (1-16 letters, digits, underscores or hyphens)');
     }
     $events = $body['events'] ?? [];
     if (!is_array($events) || !loraq_is_list($events)) {

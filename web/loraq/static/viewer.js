@@ -273,7 +273,7 @@
       if (!newest || serverNow() - newest > REPORTER_STALE_MS) {
         setStatus('pill-stale', 'NO UPDATE', 'No transmitter or receiver has contacted the server recently.');
       } else {
-        setStatus('pill-live', 'LIVE', 'Cues are reaching the server via:');
+        setStatus('pill-live', 'LIVE', 'Web-connected stations:');
       }
     }
     renderStations();

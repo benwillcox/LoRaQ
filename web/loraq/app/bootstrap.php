@@ -27,15 +27,6 @@ function loraq_config(): array
                 error_log("LoRaQ: show '$id' ignored (needs an id and a random view_key of 20+ characters)");
                 continue;
             }
-            $tokens = [];
-            foreach ($show['push_tokens'] ?? [] as $reporter => $token) {
-                $token = (string) $token;
-                if (preg_match('/^[A-Za-z0-9_-]{16,128}$/D', $token) && stripos($token, 'CHANGE') === false) {
-                    $tokens[(string) $reporter] = $token;
-                } else {
-                    error_log("LoRaQ: push token for '$reporter' in show '$id' ignored (needs 16+ random characters)");
-                }
-            }
             $title = (string) ($show['title'] ?? 'LoRaQ');
             $appName = trim((string) ($show['app_name'] ?? ''));
             $icon = trim((string) ($show['icon'] ?? ''));
@@ -48,7 +39,7 @@ function loraq_config(): array
                 'app_name' => $appName !== '' ? $appName : $title,
                 'icon' => $icon,
                 'view_key' => $key,
-                'push_tokens' => $tokens,
+                'push_token' => loraq_shared_token($show['push_tokens'] ?? [], $id),
             ];
         }
         $config['shows'] = $shows;
@@ -83,18 +74,42 @@ function loraq_find_view_key(string $key): ?string
     return $found;
 }
 
-/** Returns [show_id, reporter] for a push token. Checks every token to keep timing uniform. */
-function loraq_find_token(string $token): ?array
+function loraq_shared_token($tokens, string $showId): ?string
 {
-    $found = null;
-    foreach (loraq_config()['shows'] as $id => $show) {
-        foreach ($show['push_tokens'] as $reporter => $candidate) {
-            if (hash_equals($candidate, $token)) {
-                $found = [$id, $reporter];
-            }
+    if (!is_array($tokens)) {
+        error_log("LoRaQ: push_tokens in show '$showId' must be an array");
+        return null;
+    }
+    $shared = null;
+    foreach ($tokens as $token) {
+        if (!is_string($token) || !preg_match('/^[A-Za-z0-9_-]{16,128}$/D', $token)
+                || stripos($token, 'CHANGE') !== false) {
+            error_log("LoRaQ: invalid push token in show '$showId' ignored (needs 16+ random characters)");
+            continue;
+        }
+        if ($shared !== null && !hash_equals($shared, $token)) {
+            error_log("LoRaQ: show '$showId' has multiple distinct push tokens; configure one shared token");
+            return null;
+        }
+        $shared = $token;
+    }
+    return $shared;
+}
+
+/** Returns the show ID for a shared push token. */
+function loraq_find_token(string $token, array $shows): ?string
+{
+    $matches = [];
+    foreach ($shows as $id => $show) {
+        $sharedToken = $show['push_token'];
+        if ($sharedToken !== null && hash_equals($sharedToken, $token)) {
+            $matches[] = (string) $id;
         }
     }
-    return $found;
+    if (count($matches) > 1) {
+        error_log('LoRaQ: duplicate push token configured; refusing ambiguous push');
+    }
+    return count($matches) === 1 ? $matches[0] : null;
 }
 
 function loraq_paths(string $show): array

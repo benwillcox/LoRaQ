@@ -6,9 +6,9 @@
 //
 // view_key    : the secret part of the viewer URL  https://example.com/loraq/v/<view_key>
 //               (20-128 chars of A-Z a-z 0-9 _ -). Change it to revoke all shared links.
-// push_tokens : one token per pushing device (the name is shown on the page and in diagnostics).
-//               Put the same token in that device's loraq.ini [web_push] token = ...
-//               (16-128 chars of A-Z a-z 0-9 _ -). Remove a line to revoke that device.
+// push_tokens : one shared token per show (16-128 chars of A-Z a-z 0-9 _ -).
+//               Put it in each pushing device's loraq.ini [web_push] token = ...
+//               The array label is ignored. The viewer shows each device's Station ID.
 return [
     // Where state files are stored. Must be writable by PHP. Outside the web root is best,
     // e.g. '/home/USER/loraq-data'. The default app/data is protected by app/.htaccess.
@@ -25,8 +25,7 @@ return [
             'icon' => 'main',
             'view_key' => 'CHANGE-ME-to-a-long-random-string',
             'push_tokens' => [
-                'tx-main' => 'CHANGE-ME-token-for-main-transmitter',
-                'rx-booth' => 'CHANGE-ME-token-for-booth-receiver',
+                'shared' => 'CHANGE-ME-token-for-this-show',
             ],
         ],
     ],

@@ -2,7 +2,7 @@
 // Merge engine tests. Run: php web/tests/merge_test.php
 declare(strict_types=1);
 
-require __DIR__ . '/../loraq/app/merge.php';
+require __DIR__ . '/../loraq/app/bootstrap.php';
 
 $failures = 0;
 $count = 0;
@@ -42,6 +42,26 @@ check(loraq_is_list([]), 'empty array is a list');
 check(!loraq_is_list(['first' => 1]), 'associative array is not a list');
 
 $now = 1_000_000_000;
+
+$token = 'sample_shared_token';
+$shared = loraq_shared_token(['Train_tech' => $token, 'Marquee' => $token], 'main');
+$shows = ['main' => ['push_token' => $shared]];
+check(loraq_find_token($token, $shows) === 'main', 'the same token under two legacy labels still works');
+check(loraq_shared_token(['Train_tech' => $token], 'main') === $token, 'a single legacy label also works');
+check(loraq_shared_token(['Train_tech' => $token, 'Marquee' => 'sample_device_token'], 'main') === null,
+    'distinct per-device tokens no longer enable pushes');
+$s = loraq_empty_store();
+loraq_touch_reporter($s, 'Marquee', [], $now);
+loraq_touch_reporter($s, 'Booth-1', [], $now);
+loraq_apply_event($s, ev('Train_tech', 1, 0, [d('1', 'Standby')]), $now);
+$snap = loraq_snapshot($s);
+check(array_column($snap['reporters'], 'name') === ['Marquee', 'Booth-1']
+    && $snap['source']['station'] === 'Train_tech', 'shared reporters stay separate from the cue origin');
+check(!loraq_valid_station_id(null) && !loraq_valid_station_id('not a station')
+    && !loraq_valid_station_id(42), 'shared pushes require a valid Station ID');
+check(loraq_find_token('wrong_token', $shows) === null, 'unknown tokens cannot push');
+$shows['other'] = ['push_token' => $token];
+check(loraq_find_token($token, $shows) === null, 'a reused token cannot select an ambiguous show');
 
 // Basic display with timer: ends_at is anchored to the event time, not receipt time.
 $s = loraq_empty_store();

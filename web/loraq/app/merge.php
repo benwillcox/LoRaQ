@@ -44,6 +44,11 @@ function loraq_is_list(array $value): bool
     return true;
 }
 
+function loraq_valid_station_id($station): bool
+{
+    return is_string($station) && preg_match('/^[A-Za-z0-9_-]{1,16}$/D', $station);
+}
+
 /** Returns the event key string, or null if origin/session/seq are malformed. */
 function loraq_event_key($e): ?string
 {
@@ -53,7 +58,7 @@ function loraq_event_key($e): ?string
     $origin = $e['origin'] ?? null;
     $session = $e['session'] ?? null;
     $seq = $e['seq'] ?? null;
-    if (!is_string($origin) || !preg_match('/^[A-Za-z0-9_-]{1,16}$/D', $origin)) {
+    if (!loraq_valid_station_id($origin)) {
         return null;
     }
     if (!is_string($session) || !preg_match('/^[0-9A-F]{4}$/D', $session)) {
