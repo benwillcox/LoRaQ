@@ -63,6 +63,7 @@ class TransmitterSettings:
 class StationSettings:
     station_id: str
     ack_slot: int
+    diagnostic_log: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,7 +202,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         slot_text = parser.get("station", "ack_slot").strip()
         if not re.fullmatch(r"\d{1,2}", slot_text, re.ASCII) or int(slot_text) > 31:
             raise ValueError("[station] ack_slot must be an explicit integer from 0 to 31")
-        station = StationSettings(station_id, int(slot_text))
+        station = StationSettings(station_id, int(slot_text),
+                                  parser.getboolean("station", "diagnostic_log", fallback=False))
         receiver = ReceiverSettings(
             target_fps=30,
             audio_enabled=parser.getboolean("receiver", "audio_enabled", fallback=False),

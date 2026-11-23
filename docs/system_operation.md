@@ -73,7 +73,11 @@ In positional syntax, a bare integer after the area/colour selects an alert ID (
 ```
 The first missing ACK raises an ALERT when the acknowledgement window closes. The preview shows acknowledged stations as green (OK) and stations missing an ACK as red (NO RESPONSE). A later ACK confirming a newer cue returns the station to OK.
 
-A missing ACK means delivery is unconfirmed; the station may have received the cue but its reply was lost. Check power, radio reception and unique ACK slots. LoRaQ does not automatically re-send cues in response to missing ACKs.
+A missing ACK means delivery is unconfirmed; the station may have received the cue but its reply was lost. Check power, radio reception, unique ACK slots and matching station settings on every device. LoRaQ does not automatically re-send cues or ACKs in response to missing ACKs. Logs include millisecond timestamps and warnings for late ACK servicing, serial write failures and detected slot clashes. An ACK written to the adapter does not confirm RF delivery.
+
+With `diagnostic_log = true` in `[station]` (the same setting used on receivers), the transmitter also writes its log to `loraq-transmitter.log` next to `loraq.ini` (1 MB, three rotated copies), including any thread crash. The `RX FAULT` recovery and thread restarts described below work whether or not the log file is enabled, but are only recorded in the file when it is. Each ACK line shows when it arrived relative to the last burst and where its slot predicts it should arrive (for example `+252 ms after last burst (slot 0 expected ~304 ms)`); an ACK that arrives after its window closed is flagged. When a window closes with stations missing, one line reports how much was heard while waiting: `nothing at all was received` (look at the dongle, USB or antenna), `corrupted frames were heard` (collision or interference) or `other traffic was heard but no ACK from them` (look at the missing station). If the dongle returns no data at all for several consecutive cue windows (`RX FAULT` in the log), the transmitter reopens the dongle connection, at most once a minute, and restarts its worker or reader threads if they stop unexpectedly (`Thread ... stopped unexpectedly`). Repeated `RX FAULT` messages point to the dongle, its USB connection or antenna rather than to ACK timing.
+
+List every monitored remote station and its actual slot in the transmitter's `[expected_stations]`. A station discovered only after a command is sent cannot extend that command's already-calculated window.
 
 ### 5. OSC Relay (Transmitter to Transmitter)
 

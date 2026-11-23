@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import queue
 import random
 import re
@@ -30,11 +31,11 @@ from pythonosc import dispatcher, osc_server, udp_client
 from loraq_config import SETTINGS
 from loraq_webpush import create_pusher, is_test_frame
 from loraq_protocol import (
-    ACK_HISTORY_S, ACK_MAX_SEQS, ACK_SLOT_S, ACK_WINDOW_MARGIN_S, APP_VERSION, COLOUR_LETTERS,
+    ACK_HISTORY_S, ACK_MAX_SEQS, ACK_GUARD_S, ACK_SLOT_S, ACK_WINDOW_MARGIN_S, APP_VERSION, COLOUR_LETTERS,
     EFFECTS, MAX_FRAME_BYTES, SEQ_MAX, LineSplitter, Deduplicator,
-    ProtocolError, Record, SerialLink, ack_delay_s, ack_window_s, available_ports_hint, burst_gap_s, decode_frame,
-    describe_frame, describe_records, encode_ack, encode_cue, encode_osc, encode_reload, find_lora_port, frame_fits,
-    lora_toa_s, osc_fits, parse_osc_command, parse_timer, rssi_suffix,
+    ProtocolError, Record, SerialLink, ack_delay_s, ack_window_s, available_ports_hint,
+    burst_gap_s, decode_frame, describe_frame, describe_records, encode_ack, encode_cue, encode_osc, encode_reload,
+    find_lora_port, frame_fits, lora_toa_s, osc_fits, parse_osc_command, parse_timer, rssi_suffix,
 )
 
 # Optional graphics engine (graceful fallback to headless if pygame is missing)
@@ -64,6 +65,10 @@ COALESCE_WINDOW_SEC = SETTINGS.transmitter.coalesce_window_s
 EXPECTED_STATIONS = SETTINGS.expected_stations
 MAX_STATION_SLOTS = SETTINGS.transmitter.min_ack_slots
 MISS_ALERT_THRESHOLD = 1
+# Consecutive cue windows in which the dongle returned no bytes at all before the connection is reopened.
+RX_SILENT_WINDOWS = 3
+RX_RECOVERY_INTERVAL_S = 60.0
+SUPERVISE_INTERVAL_S = 1.0
 DUTY_CYCLE_LIMIT_PCT = SETTINGS.transmitter.duty_cycle_limit_pct
 PREVIEW_WIDTH = SETTINGS.transmitter.preview_width
 PREVIEW_HEIGHT = SETTINGS.transmitter.preview_height
@@ -138,10 +143,27 @@ console_handler = PromptAwareHandler(sys.stdout)
 
 
 def setup_logging(debug):
-    console_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
+    console_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-7s %(message)s", "%H:%M:%S"))
     root = logging.getLogger()
     root.addHandler(console_handler)
     root.setLevel(logging.DEBUG if debug else logging.INFO)
+    threading.excepthook = lambda args: log.critical(
+        "Thread %s crashed", args.thread.name if args.thread else "?",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    if not SETTINGS.station.diagnostic_log:
+        return
+    # With [station] diagnostic_log = true, a log file next to loraq.ini keeps evidence of faults that happen
+    # while nobody is watching the console.
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            SETTINGS.path.with_name("loraq-transmitter.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    except OSError as e:
+        log.warning("Diagnostic log file unavailable (%s); logging to the console only", e)
+        return
+    file_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)-7s %(message)s",
+                                                "%Y-%m-%d %H:%M:%S"))
+    root.addHandler(file_handler)
+    log.info("Diagnostic log enabled: %s", file_handler.baseFilename)
 
 
 # ----------------------------------------------------------------------
@@ -328,6 +350,7 @@ class AckTracker:
                           if sid != excluded_station}
         self._open: dict[int, AckWindow] = {}
         self._issued: dict[int, float] = {}
+        self._timing: dict[int, tuple[float, float]] = {}
         self._sent_seq: int | None = None
 
     def slot_count(self) -> int:
@@ -335,16 +358,40 @@ class AckTracker:
             slots = [s.slot for s in self._stations.values() if s.slot is not None]
         return max([MAX_STATION_SLOTS] + [slot + 1 for slot in slots])
 
-    def open_window(self, seq, label, deadline):
+    def prepare_window(self, seq, label):
+        with self._lock:
+            previous = self._sent_seq
+            now = time.monotonic()
+            self._issued = {key: issued_at for key, issued_at in self._issued.items()
+                            if key in self._open or now - issued_at < 120.0}
+            self._issued[seq] = now
+            self._open[seq] = AckWindow(seq, label, float("inf"), set(self._stations))
+            self._sent_seq = seq
+            return previous
+
+    def cancel_window(self, seq, previous):
+        with self._lock:
+            self._open.pop(seq, None)
+            self._issued.pop(seq, None)
+            self._sent_seq = previous
+        self._notify()
+
+    def open_window(self, seq, label, deadline, last_write=None, toa=0.0):
         with self._lock:
             # Receivers fold earlier seqs into their next ACK, so an open window gets one extension.
             for window in self._open.values():
-                if not window.extended and deadline > window.deadline:
+                if window.seq != seq and not window.extended and deadline > window.deadline:
                     window.deadline, window.extended = deadline, True
-            self._open[seq] = AckWindow(seq, label, deadline, set(self._stations))
-            self._issued[seq] = time.monotonic()
+            if seq in self._open:
+                self._open[seq].deadline = deadline
+            else:
+                self._open[seq] = AckWindow(seq, label, deadline, set(self._stations))
+                self._issued[seq] = time.monotonic()
+            if last_write is not None:
+                self._timing[seq] = (last_write, toa)
             self._issued = {key: issued_at for key, issued_at in self._issued.items()
-                            if time.monotonic() - issued_at < 120.0}
+                            if key in self._open or time.monotonic() - issued_at < 120.0}
+            self._timing = {key: value for key, value in self._timing.items() if key in self._issued}
             self._sent_seq = seq
         self._notify()
 
@@ -364,7 +411,8 @@ class AckTracker:
                 status = self._stations[station] = StationStatus()
             status.slot, status.version, status.online_since_ack = slot, version, True
             prev_misses = status.misses
-            status.state, status.misses = "ONLINE", 0
+            if status.state == "UNKNOWN":
+                status.state = "ONLINE"
             # A freshly (re)started receiver can't ACK cues sent before it came up.
             for window in self._open.values():
                 window.expected.discard(station)
@@ -376,13 +424,14 @@ class AckTracker:
             log.info("Station %s ONLINE (v%s, ACK slot %d)%s",
                      station, version, slot, rssi_suffix(rssi))
         if prev_misses:
-            log.info("Station %s back ONLINE after %d missed cue(s)", station, prev_misses)
+            log.info("Station %s ONLINE after %d missed cue(s); ACK still required", station, prev_misses)
         if clashes:
             log.warning("ACK slot %d is shared by %s and %s; set a unique [station] ack_slot",
                         slot, station, ", ".join(clashes))
         self._notify()
 
-    def on_ack(self, station, session, seqs, rssi=None, slot=None):
+    def on_ack(self, station, session, seqs, rssi=None, slot=None, frame_len=None):
+        received_at = time.monotonic()
         if session != self.session:
             log.debug("Ignoring ACK from %s for another transmitter session %s%s",
                       station, session, rssi_suffix(rssi))
@@ -397,8 +446,12 @@ class AckTracker:
             discovered = status is None
             if discovered:
                 status = self._stations[station] = StationStatus()
+            previous_slot = status.slot
             if slot is not None:
                 status.slot = slot
+            clashes = (sorted(sid for sid, other in self._stations.items()
+                              if sid != station and other.slot == slot)
+                       if slot is not None and (discovered or previous_slot != slot) else [])
             prev_state, prev_misses = status.state, status.misses
             for seq in valid_seqs:
                 window = self._open.get(seq)
@@ -412,14 +465,29 @@ class AckTracker:
             if current:
                 status.state, status.misses = "OK", 0
                 status.online_since_ack = False
+            timing_note = self._ack_timing_note(latest_ack, status.slot, frame_len, received_at)
         if discovered:
             log.info("Station %s discovered via ACK", station)
+        if clashes:
+            log.warning("ACK slot %d is shared by %s and %s; set a unique [station] ack_slot",
+                        slot, station, ", ".join(clashes))
         if current and prev_state in ("MISSED", "NO_RESPONSE"):
             log.info("Station %s RECOVERED after %d missed cue(s)", station, prev_misses)
         log.info("ACK from %s for Seq %s%s", station, ",".join(map(str, valid_seqs)),
                  ("" if current else f" (latest sent Seq #{self._sent_seq} still unconfirmed)")
-                 + rssi_suffix(rssi))
+                 + timing_note + rssi_suffix(rssi))
         self._notify()
+
+    def _ack_timing_note(self, seq, slot, frame_len, received_at):
+        """Describes when an ACK arrived relative to where its slot should put it (caller holds the lock)."""
+        timing = self._timing.get(seq)
+        if timing is None or slot is None or frame_len is None:
+            return ""
+        last_write, toa = timing
+        actual = received_at - last_write
+        expected = toa + ACK_GUARD_S + slot * ACK_SLOT_S + lora_toa_s(frame_len)
+        closed = " AFTER ITS WINDOW CLOSED" if seq not in self._open else ""
+        return f" +{actual * 1000:.0f} ms after last burst (slot {slot} expected ~{expected * 1000:.0f} ms){closed}"
 
     def poll(self):
         now = time.monotonic()
@@ -448,6 +516,7 @@ class AckTracker:
                 log.warning("%s ACK not received for Seq #%d (%d consecutive; cue delivery unconfirmed)", sid, seq, count)
         if closed:
             self._notify()
+        return closed
 
     def snapshot(self):
         with self._lock:
@@ -576,11 +645,33 @@ class Transmitter:
         self._duty = DutyCycleMeter()
         self._seq = 0
         self._channel_free_at = 0.0
+        self._threads = {}
+        self._last_supervised = 0.0
+        self._rx_at_send = {}
+        self._rx_rejected = 0
+        self._silent_windows = 0
+        self._last_rx_recovery = None
 
     def start(self):
-        for target, name in ((self._worker, "tx-worker"), (self._reader, "rx-reader"), (self._monitor, "ack-monitor")):
-            threading.Thread(target=target, name=name, daemon=True).start()
+        for name in ("tx-worker", "rx-reader", "ack-monitor"):
+            self._spawn(name)
         self._ui("stations", self.tracker.snapshot())
+
+    def _spawn(self, name):
+        target = {"tx-worker": self._worker, "rx-reader": self._reader, "ack-monitor": self._monitor}[name]
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        self._threads[name] = thread
+        thread.start()
+
+    def _supervise(self):
+        """A dead worker or reader would leave the transmitter half-working (e.g. sending but deaf)."""
+        if self.stop_event.is_set():
+            return
+        for name in ("tx-worker", "rx-reader"):
+            thread = self._threads.get(name)
+            if thread is not None and not thread.is_alive():
+                log.error("Thread %s stopped unexpectedly; restarting it", name)
+                self._spawn(name)
 
     def stop(self):
         self.stop_event.set()
@@ -687,31 +778,37 @@ class Transmitter:
                 self._submit_web(self.station_id, self.session, seq, records)
             return
 
+        previous_seq = self.tracker.prepare_window(seq, label)
         sent, airtime, frame_len = 0, 0.0, 0
-        for burst in range(1, bursts + 1):
-            if self.stop_event.is_set():
-                break
-            if kind == "reload":
-                frame = encode_reload(self.station_id, self.session, seq, burst, bursts)
-            elif kind == "osc":
-                frame = encode_osc(self.station_id, self.session, seq, burst, bursts, batch[0].osc)
-            else:
-                frame = encode_cue(self.station_id, self.session, seq, burst, bursts, records)
-            if len(frame) > MAX_FRAME_BYTES:
-                raise ProtocolError("command exceeds maximum frame size")
-            if not self.link.write(frame):
-                break
-            if not sent:
-                self.osc_standby.clear_forwarded()
-            sent += 1
-            frame_len = len(frame)
-            airtime += lora_toa_s(frame_len)
-            with self._radio_lock:
-                self._radio_busy_until = time.monotonic() + lora_toa_s(frame_len)
-            if burst < bursts:
-                self.stop_event.wait(burst_gap_s(frame_len))
+        try:
+            for burst in range(1, bursts + 1):
+                if self.stop_event.is_set():
+                    break
+                if kind == "reload":
+                    frame = encode_reload(self.station_id, self.session, seq, burst, bursts)
+                elif kind == "osc":
+                    frame = encode_osc(self.station_id, self.session, seq, burst, bursts, batch[0].osc)
+                else:
+                    frame = encode_cue(self.station_id, self.session, seq, burst, bursts, records)
+                if len(frame) > MAX_FRAME_BYTES:
+                    raise ProtocolError("command exceeds maximum frame size")
+                if not self.link.write(frame):
+                    break
+                if not sent:
+                    self.osc_standby.clear_forwarded()
+                sent += 1
+                frame_len = len(frame)
+                airtime += lora_toa_s(frame_len)
+                with self._radio_lock:
+                    self._radio_busy_until = time.monotonic() + lora_toa_s(frame_len)
+                if burst < bursts:
+                    self.stop_event.wait(burst_gap_s(frame_len))
+        except Exception:
+            self.tracker.cancel_window(seq, previous_seq)
+            raise
 
         if not sent:
+            self.tracker.cancel_window(seq, previous_seq)
             self.failures += 1
             self._ui("tx_failed", seq)
             log.error("NOT SENT Seq #%d (serial write failed): %s", seq, label)
@@ -725,13 +822,16 @@ class Transmitter:
         with self._radio_lock:
             self._channel_free_at = ack_deadline
 
+        self._rx_at_send[seq] = (self.link.rx_bytes, self._rx_rejected)
+        while len(self._rx_at_send) > 64:
+            del self._rx_at_send[next(iter(self._rx_at_send))]
+        self.tracker.open_window(seq, label, ack_deadline, last_write, toa)
         if sent < bursts:
             log.warning("PARTIAL Seq #%d: only %d/%d bursts written: %s", seq, sent, bursts, label)
         else:
             log.info("Sent Seq #%d (%dx burst, %.0f ms air each): %s", seq, bursts, toa * 1000, label)
 
         self._report_duty(airtime, toa)
-        self.tracker.open_window(seq, label, ack_deadline)
         self._ui("sent_seq", seq, sent == bursts)
         if kind == "cue" and records:
             self._submit_web(self.station_id, self.session, seq, records)
@@ -752,20 +852,34 @@ class Transmitter:
     def _reader(self):
         splitter = LineSplitter()
         dedup = Deduplicator()
+        failures = 0
         while not self.stop_event.is_set():
-            self._service_preview_acks()
-            if not self.link.connected:
-                if not self.link.ensure_open():
-                    self.stop_event.wait(0.5)
-                    continue
+            try:
+                self._reader_step(splitter, dedup)
+            except Exception:
+                failures += 1
+                log.exception("Receive loop error (%d in a row); continuing", failures)
                 splitter.reset()
-            for line, rssi in splitter.feed(self.link.read_available(
-                    timeout=self._preview_read_timeout())):
-                try:
-                    self._handle_line(line, dedup, rssi)
-                except Exception:
-                    log.exception("Error handling received line %r", line[:80])
-            self._service_preview_acks()
+                if failures >= 3:
+                    self.link.reconnect()
+                self.stop_event.wait(min(5.0, 0.2 * failures))
+            else:
+                failures = 0
+
+    def _reader_step(self, splitter, dedup):
+        self._service_preview_acks()
+        if not self.link.connected:
+            if not self.link.ensure_open():
+                self.stop_event.wait(0.5)
+                return
+            splitter.reset()
+        for line, rssi in splitter.feed(self.link.read_available(
+                timeout=self._preview_read_timeout())):
+            try:
+                self._handle_line(line, dedup, rssi)
+            except Exception:
+                log.exception("Error handling received line %r", line[:80])
+        self._service_preview_acks()
 
     def _preview_read_timeout(self):
         with self._radio_lock:
@@ -828,24 +942,30 @@ class Transmitter:
 
     def _handle_line(self, line, dedup, rssi=None):
         if b"~" not in line:
+            self._rx_rejected += 1
             log.debug("Ignoring non-LoRaQ serial line: %r", line[:80])
             return
         try:
             frame = decode_frame(line)
         except ProtocolError as e:
+            self._rx_rejected += 1
             log.warning("RX rejected (%s): %r", e, line[:80])
             return
         frame.rssi = rssi
         self.osc_standby.clear_forwarded()
         if frame.kind == "A":
-            self.tracker.on_ack(frame.station, frame.session, frame.acked, rssi, frame.slot)
+            self.tracker.on_ack(frame.station, frame.session, frame.acked, rssi, frame.slot,
+                                len(line) - line.rfind(b"~") + 2)
         elif frame.kind == "O":
             self.tracker.on_online(frame.station, frame.version, frame.slot, rssi)
-        elif frame.session != self.session:
-            is_new = dedup.is_new((frame.session, frame.seq))
+        elif not (frame.station == self.station_id and frame.session == self.session):
+            is_new = dedup.is_new((frame.station, frame.session, frame.seq))
             self._schedule_preview_ack(frame, len(line) - line.rfind(b"~") + 2, is_new)
             if not is_new:
                 return
+            if frame.session == self.session:
+                log.warning("Transmitter %s shares this session ID; ACKs may be ambiguous until a restart",
+                            frame.station)
             self._ui("received_source", frame.station, frame.rssi)
             log.info("Remote cue from another transmitter %s (session %s): %s%s",
                      frame.station, frame.session, describe_frame(frame), rssi_suffix(rssi))
@@ -860,7 +980,52 @@ class Transmitter:
 
     def _monitor(self):
         while not self.stop_event.wait(0.1):
-            self.tracker.poll()
+            try:
+                self._monitor_once()
+            except Exception:
+                log.exception("ACK monitor error")
+                self.stop_event.wait(1.0)
+
+    def _monitor_once(self):
+        self._check_rx_health(self.tracker.poll())
+        now = time.monotonic()
+        if now - self._last_supervised >= SUPERVISE_INTERVAL_S:
+            self._last_supervised = now
+            self._supervise()
+
+    def _check_rx_health(self, closed):
+        """Reopens the dongle if it returns nothing at all, not even garbled data, for several cue windows."""
+        for window in closed:
+            at_send = self._rx_at_send.pop(window.seq, None)
+            if at_send is None or not window.expected:
+                continue
+            bytes_heard = self.link.rx_bytes - at_send[0]
+            rejected = self._rx_rejected - at_send[1]
+            missing = sorted(window.expected - window.acked)
+            if missing:
+                hint = ("nothing at all was received" if bytes_heard == 0 else
+                        "corrupted frames were heard (collision or interference)" if rejected else
+                        "other traffic was heard but no ACK from them")
+                log.info("Seq #%d ACK window: %d byte(s) received, %d unparseable frame(s); %s; missing: %s",
+                         window.seq, bytes_heard, rejected, hint, ", ".join(missing))
+            if window.acked or bytes_heard:
+                self._silent_windows = 0
+            else:
+                self._silent_windows += 1
+        if self._silent_windows < RX_SILENT_WINDOWS:
+            return
+        now = time.monotonic()
+        if self._last_rx_recovery is not None and now - self._last_rx_recovery < RX_RECOVERY_INTERVAL_S:
+            return
+        with self._radio_lock:
+            if self._transmitting:
+                return
+            self._last_rx_recovery = now
+            log.error("RX FAULT: no LoRa data of any kind received during the last %d ACK windows; "
+                      "reopening the dongle connection. If this repeats, check or replug the dongle.",
+                      self._silent_windows)
+            self._silent_windows = 0
+            self.link.reconnect()
 
 
 class RangeTest:

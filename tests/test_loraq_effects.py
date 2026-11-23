@@ -122,6 +122,16 @@ class TransmitterRemoteEffectTests(unittest.TestCase):
         self.tx.service_ui_events(engine, events, audio)
         self.assertEqual(audio.play_records.call_count, 2)
 
+    def test_remote_station_with_same_session_is_not_mistaken_for_own_echo(self):
+        events = queue.Queue()
+        transmitter = self.tx.Transmitter(Mock(), on_ui=events.put, preview_enabled=True)
+        line = encode_cue("REMOTE", transmitter.session, 1, 1, 1, [Record("D", "1", text="GO")])
+        with self.assertLogs("loraq", level="WARNING") as messages:
+            transmitter._handle_line(line, Deduplicator())
+        self.assertIn(transmitter.session, transmitter._pending_acks)
+        self.assertTrue(any("shares this session ID" in message for message in messages.output))
+        self.assertTrue(any(event[0] == "remote_records" for event in events.queue))
+
     def test_received_rssi_is_logged(self):
         transmitter = self.tx.Transmitter(Mock())
         transmitter.session = "FFFF"
@@ -212,6 +222,7 @@ class TransmitterRemoteEffectTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             transmitter._transmit_batch([self.tx.TxItem("cue", [Record("D", "1", text="X" * 300)])])
         transmitter.link.write.assert_not_called()
+        self.assertFalse(transmitter.tracker._open)
 
     def test_ack_rssi_is_appended_to_ack_log(self):
         tracker = self.tx.AckTracker("ABCD")
@@ -243,11 +254,30 @@ class TransmitterRemoteEffectTests(unittest.TestCase):
         self.assertEqual(row[1], 9)
         self.assertEqual(tracker.slot_count(), 10)
 
+    def test_ack_arriving_during_serial_write_is_not_discarded(self):
+        link = Mock()
+        with patch.object(self.tx, "EXPECTED_STATIONS", {"STATION": 0}), \
+                patch.object(self.tx, "DEFAULT_BURSTS", 1):
+            transmitter = self.tx.Transmitter(link)
+            link.write.side_effect = lambda data: (
+                transmitter.tracker.on_ack("STATION", transmitter.session, [1], slot=0) or True)
+            transmitter._transmit_batch([self.tx.TxItem("cue", [Record("D", "1", text="GO")])])
+        self.assertIn("STATION", transmitter.tracker._open[1].acked)
+
+    def test_ack_reports_a_newly_discovered_slot_clash(self):
+        with patch.object(self.tx, "EXPECTED_STATIONS", {"FIRST": 2}):
+            tracker = self.tx.AckTracker("ABCD")
+        tracker.open_window(1, "cue", 1000000000)
+        with self.assertLogs("loraq", level="WARNING") as messages:
+            tracker.on_ack("SECOND", "ABCD", [1], slot=2)
+        self.assertTrue(any("slot 2 is shared by SECOND and FIRST" in line for line in messages.output))
+
     def test_own_echo_and_local_preview_are_silent(self):
         events = queue.Queue()
         transmitter = self.tx.Transmitter(Mock(), on_ui=events.put)
         records = [Record("D", "1", effect_id=2, text="GO")]
-        transmitter._handle_line(encode_cue("REMOTE", transmitter.session, 1, 1, 3, records), Deduplicator())
+        transmitter._handle_line(encode_cue(transmitter.station_id, transmitter.session, 1, 1, 3, records),
+                                 Deduplicator())
         self.assertTrue(events.empty())
         events.put(("records", records))
         audio, engine = Mock(), Mock()
@@ -394,7 +424,7 @@ class TransmitterPreviewAckTests(unittest.TestCase):
         self.assertFalse(self.transmitter.osc_standby.armed)
 
     def test_no_acks_for_own_echo_ack_online_invalid_or_headless(self):
-        for line in (encode_cue("REMOTE", "FFFF", 1, 1, 1, [Record("F", "0", effect_id=3)]),
+        for line in (encode_cue(self.transmitter.station_id, "FFFF", 1, 1, 1, [Record("F", "0", effect_id=3)]),
                      encode_ack("REMOTE", 0, "FFFF", [1]), encode_online("REMOTE", "2.1", 0), b"~invalid"):
             self.transmitter._handle_line(line, self.dedup)
         self.assertFalse(self.transmitter._pending_acks)
@@ -897,8 +927,8 @@ class ReceiverEffectTests(unittest.TestCase):
                 waits = []
                 if kind in ("ack", "reload"):
                     radio._recent.append(("ABCD", 1, 100.0))
-                    radio._pending_ack = receiver.PendingAck("ABCD", 100.04)
-                    radio._reload_after_ack = kind == "reload"
+                    radio._pending_acks["ABCD"] = receiver.PendingAck("ABCD", 100.04)
+                    radio._reload_after_ack = "ABCD" if kind == "reload" else None
                 elif kind == "online":
                     radio._online_due = 100.02
 
@@ -920,7 +950,7 @@ class ReceiverEffectTests(unittest.TestCase):
                     self.assertAlmostEqual(waits[0], 0.02 if kind == "online" else 0.04)
                     frame = decode_frame(link.write.call_args.args[0])
                     self.assertEqual(frame.kind, "O" if kind == "online" else "A")
-                    self.assertIsNone(radio._pending_ack)
+                    self.assertFalse(radio._pending_acks)
                     self.assertIsNone(radio._online_due)
                     self.assertEqual(reload_event.is_set(), kind == "reload")
 
@@ -946,8 +976,8 @@ class ReceiverEffectTests(unittest.TestCase):
             radio.run()
         link.ensure_open.assert_called_once()
         self.assertEqual(frames.get_nowait().records[0].text, "GO")
-        self.assertIsNotNone(radio._pending_ack)
-        self.assertEqual(radio._online_due, 101.0)
+        self.assertIn("ABCD", radio._pending_acks)
+        self.assertGreater(radio._online_due, radio._pending_acks["ABCD"].due)
 
     def test_radio_read_wait_is_capped_by_nearest_deadline(self):
         receiver = load_script("deadline_rx", "LoRaQ-display.py")
@@ -957,14 +987,14 @@ class ReceiverEffectTests(unittest.TestCase):
             self.assertEqual(radio._read_timeout(), 0.25)
             radio._online_due = 101.0
             self.assertEqual(radio._read_timeout(), 0.25)
-            radio._pending_ack = receiver.PendingAck("ABCD", 100.04)
+            radio._pending_acks["ABCD"] = receiver.PendingAck("ABCD", 100.04)
             self.assertAlmostEqual(radio._read_timeout(), 0.04)
             radio._online_due = 100.02
             self.assertAlmostEqual(radio._read_timeout(), 0.02)
             radio._online_due = 99.0
             self.assertEqual(radio._read_timeout(), 0.0)
             radio._online_due = None
-            radio._pending_ack.due = 100.0
+            radio._pending_acks["ABCD"].due = 100.0
             self.assertEqual(radio._read_timeout(), 0.0)
 
     def test_radio_bursts_apply_once_and_retrigger_with_new_sequence(self):
@@ -975,12 +1005,152 @@ class ReceiverEffectTests(unittest.TestCase):
         for burst in range(1, 4):
             radio._handle_line(encode_cue("REMOTE", "ABCD", 1, burst, 3, [record]))
         self.assertEqual(frames.qsize(), 1)
-        self.assertIsNotNone(radio._pending_ack)
+        self.assertIn("ABCD", radio._pending_acks)
         self.assertEqual(len(radio._recent), 1)
         self.assertEqual(frames.get_nowait().records, [record])
         radio._handle_line(encode_cue("REMOTE", "ABCD", 2, 1, 3, [record]))
         self.assertEqual(frames.qsize(), 1)
         self.assertEqual(frames.get_nowait().seq, 2)
+
+    def test_overlapping_sessions_never_ack_outside_their_slot(self):
+        receiver = load_script("overlap_rx", "LoRaQ-display.py")
+        link = Mock()
+        reload_event = threading.Event()
+        radio = receiver.RadioThread(link, "TEST", 1, queue.Queue(), reload_event)
+        with patch.object(receiver.time, "monotonic", return_value=100.0):
+            radio._handle_line(encode_cue("FIRST", "ABCD", 1, 1, 1, [Record("D", "1", text="GO")]))
+            with self.assertLogs("loraq.rx", level="WARNING"):
+                radio._handle_line(encode_reload("SECOND", "1234", 1, 1, 1))
+        link.write.assert_not_called()
+        first_due = radio._pending_acks["ABCD"].due
+        with patch.object(receiver.time, "monotonic", return_value=first_due - 0.01):
+            radio._service_timers()
+        link.write.assert_not_called()
+        with patch.object(receiver.time, "monotonic", return_value=first_due):
+            radio._service_timers()
+            self.assertFalse(reload_event.is_set())
+            radio._service_timers()
+        self.assertEqual(link.write.call_count, 1)
+        self.assertGreater(radio._ack_free_at, first_due)
+        with patch.object(receiver.time, "monotonic", return_value=radio._ack_free_at):
+            radio._service_timers()
+        self.assertEqual([decode_frame(call.args[0]).session for call in link.write.call_args_list],
+                         ["ABCD", "1234"])
+        self.assertTrue(reload_event.is_set())
+
+    def test_startup_announcement_waits_for_pending_ack(self):
+        receiver = load_script("online_defer_rx", "LoRaQ-display.py")
+        link = Mock()
+        radio = receiver.RadioThread(link, "TEST", 1, queue.Queue(), threading.Event())
+        radio._pending_acks["ABCD"] = receiver.PendingAck("ABCD", 150.0)
+        radio._online_due = 100.0
+        with patch.object(receiver.time, "monotonic", return_value=100.0):
+            radio._service_timers()
+        link.write.assert_not_called()
+        self.assertGreater(radio._online_due, 100.0)
+        radio._pending_acks.clear()
+        with patch.object(receiver.time, "monotonic", return_value=radio._online_due):
+            radio._service_timers()
+        self.assertEqual(decode_frame(link.write.call_args.args[0]).kind, "O")
+
+    def test_diagnostics_log_overheard_acks_with_timing_only_when_enabled(self):
+        receiver = load_script("diag_rx", "LoRaQ-display.py")
+        cue = encode_cue("TX_A", "ABCD", 7, 3, 3, [Record("D", "1", text="GO")])
+        ack = encode_ack("RX_B", 1, "ABCD", [7]) + b"\xC4"
+        for enabled in (True, False):
+            with self.subTest(diagnostics=enabled):
+                radio = receiver.RadioThread(Mock(), "TEST", 0, queue.Queue(), threading.Event(),
+                                             diagnostics=enabled)
+                with patch.object(receiver.time, "monotonic", return_value=100.0):
+                    radio._handle_line(cue.strip())
+                with patch.object(receiver.time, "monotonic", return_value=100.4), \
+                        self.assertLogs("loraq.rx", level="INFO" if enabled else "DEBUG") as messages:
+                    radio._handle_line(ack[:-1].strip(), 0xC4)
+                needle = "Heard ACK from RX_B" if enabled else "Heard ACK from station RX_B"
+                heard = [m for m in messages.output if needle in m]
+                self.assertEqual(len(heard), 1)
+                self.assertEqual("[DIAG]" in heard[0], enabled)
+                self.assertEqual(radio._stats["acks_heard"], 1)
+                if enabled:
+                    self.assertIn("+400 ms after burst 3/3 of Seq #7 (slot 1 expected ~", heard[0])
+                    self.assertTrue(heard[0].endswith("[RSSI: -60.0 dBm]"))
+
+    def test_diagnostics_heartbeat_and_late_ack_counters(self):
+        receiver = load_script("diag_health_rx", "LoRaQ-display.py")
+        link = Mock(connected=True, rx_bytes=1234)
+        radio = receiver.RadioThread(link, "TEST", 0, queue.Queue(), threading.Event(), diagnostics=True)
+        with patch.object(receiver.time, "monotonic", return_value=100.0):
+            radio._handle_line(encode_reload("TX_A", "ABCD", 1, 1, 1).strip())
+        with patch.object(receiver.time, "monotonic", return_value=101.0), \
+                self.assertLogs("loraq.rx", level="INFO") as messages:
+            radio._service_timers()
+            radio._service_diagnostics()
+            radio._service_diagnostics()
+        health = [m for m in messages.output if "Health:" in m]
+        self.assertEqual(len(health), 1)
+        self.assertIn("link up, 1234 dongle byte(s)", health[0])
+        self.assertIn("cues 1 (0 duplicate burst(s)), 0 unreadable", health[0])
+        self.assertIn("sent 1 ACK(s), 1 late", health[0])
+        self.assertTrue(any("serial write took" in m for m in messages.output))
+
+    def test_diagnostic_log_file_is_written_off_thread_and_flushed_on_stop(self):
+        import logging
+        import tempfile
+        from pathlib import Path
+        receiver = load_script("diag_file_rx", "LoRaQ-display.py")
+        root = logging.getLogger()
+        original_hook, original_handlers, original_level = threading.excepthook, list(root.handlers), root.level
+        root.setLevel(logging.INFO)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "loraq-display.log"
+            listener = receiver.start_diagnostic_log(path)
+            try:
+                self.assertIsNotNone(listener)
+                receiver.log.info("[DIAG] probe line")
+                thread = threading.Thread(target=lambda: 1 / 0, name="probe-thread")
+                thread.start()
+                thread.join()
+            finally:
+                listener.stop()
+                for handler in root.handlers[:]:
+                    if handler not in original_handlers:
+                        root.removeHandler(handler)
+                threading.excepthook = original_hook
+                root.setLevel(original_level)
+                for handler in listener.handlers:
+                    handler.close()
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("loraq.rx: [DIAG] probe line", text)
+            self.assertIn("Thread probe-thread crashed", text)
+            with self.assertLogs("loraq.rx", level="WARNING"):
+                self.assertIsNone(receiver.start_diagnostic_log(Path(directory) / "missing" / "x.log"))
+
+    def test_system_health_never_raises(self):
+        receiver = load_script("diag_health_text_rx", "LoRaQ-display.py")
+        self.assertIsInstance(receiver.read_system_health(), str)
+        with patch("builtins.open", side_effect=OSError("no such file")), \
+                patch.object(receiver.os, "getloadavg", side_effect=OSError("unsupported"), create=True):
+            self.assertEqual(receiver.read_system_health(), "system health unavailable")
+
+    def test_deduplication_distinguishes_transmitter_identity(self):
+        receiver = load_script("session_collision_rx", "LoRaQ-display.py")
+        frames = queue.Queue()
+        radio = receiver.RadioThread(Mock(), "TEST", 1, frames, threading.Event())
+        for station in ("FIRST", "SECOND"):
+            radio._handle_line(encode_cue(station, "ABCD", 1, 1, 1, [Record("D", "1", text=station)]))
+        self.assertEqual([frame.station for frame in frames.queue], ["FIRST", "SECOND"])
+
+    def test_receiver_ack_write_failure_is_logged(self):
+        receiver = load_script("failed_ack_rx", "LoRaQ-display.py")
+        link = Mock()
+        link.write.return_value = False
+        radio = receiver.RadioThread(link, "TEST", 0, queue.Queue(), threading.Event())
+        with patch.object(receiver.time, "monotonic", return_value=100.0):
+            radio._handle_line(encode_reload("REMOTE", "ABCD", 1, 1, 1))
+        with patch.object(receiver.time, "monotonic", return_value=101.0), \
+                self.assertLogs("loraq.rx", level="WARNING") as messages:
+            radio._service_timers()
+        self.assertTrue(any("Write failed" in message for message in messages.output))
 
     def test_received_rssi_is_logged(self):
         receiver = load_script("rssi_log_rx", "LoRaQ-display.py")
@@ -1073,7 +1243,235 @@ class ReceiverEffectTests(unittest.TestCase):
             self.assertEqual(os.environ["SDL_AUDIODRIVER"], "test-driver")
 
 
+class TransmitterReceivePathTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tx = load_script("receive_path_tx", "LoRaQ-transmitter.py")
+
+    def make_transmitter(self, link=None):
+        link = link or Mock(read_timeout=0.05, connected=True, rx_bytes=100)
+        with patch.object(self.tx, "EXPECTED_STATIONS", {"STATION": 0}), \
+                patch.object(self.tx, "DEFAULT_BURSTS", 1):
+            return link, self.tx.Transmitter(link)
+
+    def run_reader(self, transmitter, reads):
+        reads = list(reads)
+
+        def read_available(timeout):
+            item = reads.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            if not reads:
+                transmitter.stop_event.set()
+            return item
+
+        transmitter.link.read_available.side_effect = read_available
+        with patch.object(transmitter.stop_event, "wait", return_value=False):
+            transmitter._reader()
+
+    def test_reader_keeps_listening_after_unexpected_errors(self):
+        link, transmitter = self.make_transmitter()
+        transmitter.tracker.open_window(1, "GO", 1e9)
+        ack = encode_ack("STATION", 0, transmitter.session, [1]) + b"\xD2"
+        with self.assertLogs("loraq", level="ERROR"):
+            self.run_reader(transmitter, [RuntimeError("driver glitch"), ValueError("again"), ack])
+        self.assertIn("STATION", transmitter.tracker._open[1].acked)
+        link.reconnect.assert_not_called()
+
+    def test_reader_reopens_dongle_after_repeated_errors(self):
+        link, transmitter = self.make_transmitter()
+        with self.assertLogs("loraq", level="ERROR"):
+            self.run_reader(transmitter, [RuntimeError("1"), RuntimeError("2"), RuntimeError("3"), b""])
+        link.reconnect.assert_called_once()
+
+    def test_stopped_worker_and_reader_threads_are_restarted(self):
+        _, transmitter = self.make_transmitter()
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        transmitter._threads = {"tx-worker": dead, "rx-reader": dead}
+        with patch.object(self.tx.threading, "Thread") as factory, \
+                self.assertLogs("loraq", level="ERROR") as messages:
+            transmitter._supervise()
+        self.assertEqual({call.kwargs["name"]: call.kwargs["target"] for call in factory.call_args_list},
+                         {"tx-worker": transmitter._worker, "rx-reader": transmitter._reader})
+        self.assertEqual(factory.return_value.start.call_count, 2)
+        self.assertEqual(len(messages.output), 2)
+
+    def send_and_close_window(self, transmitter, received_bytes):
+        with patch.object(self.tx, "DEFAULT_BURSTS", 1):
+            transmitter._transmit_batch([self.tx.TxItem("cue", [Record("D", "1", text="GO")])])
+        transmitter.link.rx_bytes += received_bytes
+        for window in transmitter.tracker._open.values():
+            window.deadline = 0.0
+        transmitter._monitor_once()
+
+    def test_repeated_windows_with_no_received_bytes_reopen_dongle(self):
+        link, transmitter = self.make_transmitter()
+        with self.assertLogs("loraq", level="ERROR") as messages:
+            for _ in range(self.tx.RX_SILENT_WINDOWS - 1):
+                self.send_and_close_window(transmitter, 0)
+            link.reconnect.assert_not_called()
+            self.send_and_close_window(transmitter, 0)
+        link.reconnect.assert_called_once()
+        self.assertTrue(any("no LoRa data" in message for message in messages.output))
+        with self.assertLogs("loraq", level="WARNING"):
+            for _ in range(self.tx.RX_SILENT_WINDOWS):
+                self.send_and_close_window(transmitter, 0)
+        link.reconnect.assert_called_once()
+
+    def test_received_bytes_or_acks_prevent_receive_recovery(self):
+        link, transmitter = self.make_transmitter()
+        for _ in range(self.tx.RX_SILENT_WINDOWS * 2):
+            self.send_and_close_window(transmitter, 5)
+        link.reconnect.assert_not_called()
+
+    def test_log_file_follows_station_diagnostic_log_setting(self):
+        import logging
+        import tempfile
+        from pathlib import Path
+        root = logging.getLogger()
+        original_hook, original_level, original_handlers = threading.excepthook, root.level, list(root.handlers)
+        for enabled in (True, False):
+            with self.subTest(diagnostic_log=enabled), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(self.tx, "SETTINGS", SimpleNamespace(
+                        path=Path(directory) / "loraq.ini", station=SimpleNamespace(diagnostic_log=enabled))):
+                try:
+                    self.tx.setup_logging(False)
+                    thread = threading.Thread(target=lambda: 1 / 0, name="probe-thread")
+                    thread.start()
+                    thread.join()
+                    for handler in root.handlers:
+                        handler.flush()
+                    log_file = Path(directory) / "loraq-transmitter.log"
+                    self.assertEqual(log_file.exists(), enabled)
+                    text = log_file.read_text(encoding="utf-8") if enabled else ""
+                finally:
+                    for handler in root.handlers[:]:
+                        if handler not in original_handlers:
+                            root.removeHandler(handler)
+                            handler.close()
+                    root.setLevel(original_level)
+                    threading.excepthook = original_hook
+            if enabled:
+                self.assertIn("Thread probe-thread crashed", text)
+                self.assertIn("ZeroDivisionError", text)
+
+    def test_ack_log_reports_arrival_against_expected_slot(self):
+        import loraq_protocol as protocol
+        with patch.object(self.tx, "EXPECTED_STATIONS", {"STATION": 2}):
+            tracker = self.tx.AckTracker("ABCD")
+        ack = encode_ack("STATION", 2, "ABCD", [1])
+        ack_len = len(ack)
+        toa = protocol.lora_toa_s(40)
+        expected = toa + protocol.ACK_GUARD_S + 2 * protocol.ACK_SLOT_S + protocol.lora_toa_s(ack_len)
+        with patch.object(self.tx.time, "monotonic", return_value=100.0):
+            tracker.open_window(1, "GO", 105.0, last_write=100.0, toa=toa)
+        with patch.object(self.tx.time, "monotonic", return_value=100.0 + expected + 0.2), \
+                self.assertLogs("loraq", level="INFO") as messages:
+            tracker.on_ack("STATION", "ABCD", [1], slot=2, frame_len=ack_len)
+        text = next(line for line in messages.output if "ACK from STATION" in line)
+        self.assertIn(f"+{(expected + 0.2) * 1000:.0f} ms after last burst", text)
+        self.assertIn(f"slot 2 expected ~{expected * 1000:.0f} ms", text)
+        self.assertNotIn("AFTER ITS WINDOW CLOSED", text)
+        with patch.object(self.tx.time, "monotonic", return_value=106.0):
+            tracker.poll()
+        with patch.object(self.tx.time, "monotonic", return_value=106.0), \
+                self.assertLogs("loraq", level="INFO") as messages:
+            tracker.on_ack("STATION", "ABCD", [1], slot=2, frame_len=ack_len)
+        self.assertTrue(any("AFTER ITS WINDOW CLOSED" in line for line in messages.output))
+
+    def test_missed_window_reports_whether_anything_was_heard(self):
+        cases = (
+            (0, 0, "nothing at all was received"),
+            (30, 1, "corrupted frames were heard"),
+            (30, 0, "other traffic was heard but no ACK from them"),
+        )
+        for received, rejected, expected_hint in cases:
+            with self.subTest(hint=expected_hint):
+                link, transmitter = self.make_transmitter()
+                with patch.object(self.tx, "DEFAULT_BURSTS", 1):
+                    transmitter._transmit_batch([self.tx.TxItem("cue", [Record("D", "1", text="GO")])])
+                link.rx_bytes += received
+                transmitter._rx_rejected += rejected
+                for window in transmitter.tracker._open.values():
+                    window.deadline = 0.0
+                with self.assertLogs("loraq", level="INFO") as messages:
+                    transmitter._monitor_once()
+                summary = next(line for line in messages.output if "ACK window" in line)
+                self.assertIn(expected_hint, summary)
+                self.assertIn("missing: STATION", summary)
+
+    def test_unparseable_lines_are_counted(self):
+        _, transmitter = self.make_transmitter()
+        with self.assertLogs("loraq", level="WARNING"):
+            transmitter._handle_line(b"~garbage*0000", Deduplicator())
+        transmitter._handle_line(b"no marker here", Deduplicator())
+        self.assertEqual(transmitter._rx_rejected, 2)
+
+    def test_remote_command_with_matching_session_but_other_station_is_processed(self):
+        events = queue.Queue()
+        transmitter = self.tx.Transmitter(Mock(), on_ui=events.put)
+        line = encode_cue("OTHER", transmitter.session, 1, 1, 1, [Record("D", "1", text="GO")])
+        with self.assertLogs("loraq", level="WARNING"):
+            transmitter._handle_line(line, Deduplicator())
+        self.assertTrue(any(event[0] == "remote_records" for event in events.queue))
+        events.queue.clear()
+        transmitter._handle_line(
+            encode_cue(transmitter.station_id, transmitter.session, 2, 1, 1, [Record("D", "1", text="ECHO")]),
+            Deduplicator())
+        self.assertTrue(events.empty())
+
+
 class ProtocolEffectTests(unittest.TestCase):
+    def test_port_enumeration_errors_do_not_escape_reconnect(self):
+        import loraq_protocol as protocol
+        link = protocol.SerialLink(9600)
+        with patch.object(protocol, "find_lora_port", side_effect=ValueError("enumeration failed")), \
+                self.assertLogs("loraq", level="WARNING"):
+            self.assertFalse(link.ensure_open())
+        self.assertIn("enumeration failed", link.last_error)
+        with patch.object(protocol.serial.tools.list_ports, "comports", side_effect=OSError("registry busy")):
+            self.assertIn("registry busy", protocol.available_ports_hint())
+
+    def test_reconnect_releases_port_and_receive_counters_track_data(self):
+        import serial
+        from loraq_protocol import SerialLink
+        link = SerialLink(9600, read_timeout=0.05)
+        link._ser = serial.serial_for_url("loop://", timeout=0.05)
+        self.assertEqual((link.rx_bytes, link.last_rx), (0, None))
+        link._ser.write(b"abc")
+        self.assertEqual(link.read_available(), b"abc")
+        self.assertEqual(link.rx_bytes, 3)
+        self.assertIsNotNone(link.last_rx)
+        link._next_attempt = 1e12
+        self.assertTrue(link.reconnect())
+        self.assertFalse(link.connected)
+        self.assertEqual(link._next_attempt, 0.0)
+
+    def test_reconnect_gives_up_if_serial_io_is_stuck(self):
+        from loraq_protocol import SerialLink
+        link = SerialLink(9600)
+        link._ser = Mock(is_open=True)
+        link.RECONNECT_LOCK_TIMEOUT_S = 0.05
+        stuck, release = threading.Event(), threading.Event()
+
+        def hold_lock():
+            with link.io_lock:
+                stuck.set()
+                release.wait(2.0)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        try:
+            self.assertTrue(stuck.wait(1.0))
+            with self.assertLogs("loraq", level="ERROR"):
+                self.assertFalse(link.reconnect())
+            self.assertFalse(link.connected)
+        finally:
+            release.set()
+            holder.join(2.0)
+
     def test_splitter_overflow_warns_and_recovers(self):
         splitter = LineSplitter()
         sample = b"\x00\xff" * 32
@@ -1164,6 +1562,17 @@ class ProtocolEffectTests(unittest.TestCase):
             self.assertEqual(link.read_available(timeout=0.25), b"")
         self.assertFalse(link.connected)
         port.close.assert_called_once()
+
+    def test_short_serial_write_is_reported_as_failure(self):
+        from loraq_protocol import SerialLink
+        link = SerialLink(9600)
+        port = Mock(is_open=True)
+        port.write.return_value = 2
+        link._ser = port
+        with self.assertLogs("loraq", level="ERROR") as messages:
+            self.assertFalse(link.write(b"hello"))
+        self.assertTrue(any("short write (2/5 bytes)" in line for line in messages.output))
+        self.assertFalse(link.connected)
 
     def test_round_trip_all_effects(self):
         for effect_id in EFFECTS:

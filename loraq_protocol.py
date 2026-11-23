@@ -25,7 +25,7 @@ import serial.tools.list_ports
 
 from loraq_config import SETTINGS, lora_airtime_s
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 log = logging.getLogger("loraq")
 
@@ -397,8 +397,20 @@ def ack_window_s(frame_len: int, slot_count: int) -> float:
 # ----------------------------------------------------------------------
 def available_ports_hint() -> str:
     """Lists serial ports the OS can enumerate, for 'device not found' messages."""
-    ports = sorted(f"{p.device} ({p.description})" for p in serial.tools.list_ports.comports())
+    try:
+        ports = sorted(f"{p.device} ({p.description})" for p in serial.tools.list_ports.comports())
+    except Exception as e:
+        return f"unavailable ({e})"
     return ", ".join(ports) if ports else "none enumerated"
+
+
+def _list_ports() -> list:
+    # Windows enumeration can fail transiently while a USB serial device re-enumerates.
+    try:
+        return list(serial.tools.list_ports.comports())
+    except Exception as e:
+        log.debug("Serial port enumeration failed: %s", e)
+        return []
 
 
 def find_lora_port(interface: str | None = None) -> str | None:
@@ -412,7 +424,7 @@ def find_lora_port(interface: str | None = None) -> str | None:
     if interface in ("auto", "usb"):
         if os.path.exists(USB_SYMLINK):
             return USB_SYMLINK
-        for port in serial.tools.list_ports.comports():
+        for port in _list_ports():
             info = f"{port.device} {port.description} {port.hwid}".lower()
             if any(key in info for key in _USB_KEYWORDS):
                 return port.device
@@ -427,6 +439,7 @@ class SerialLink:
     """Connection to the LoRa dongle that reopens itself after an unplug or error."""
 
     RETRY_INTERVAL_S = 2.0
+    RECONNECT_LOCK_TIMEOUT_S = 2.0
 
     def __init__(self, baud: int, port: str | None = None, read_timeout: float = 0.05,
                  interface: str | None = None):
@@ -441,6 +454,8 @@ class SerialLink:
         self._next_attempt = 0.0
         self._warned = False
         self.last_error: str | None = "Serial device not initialised"
+        self.rx_bytes = 0
+        self.last_rx: float | None = None
 
     @property
     def connected(self) -> bool:
@@ -455,9 +470,10 @@ class SerialLink:
             if now < self._next_attempt:
                 return False
             self._next_attempt = now + self.RETRY_INTERVAL_S
-            port = self.fixed_port or find_lora_port(self.interface)
             ser = None
+            port = None
             try:
+                port = self.fixed_port or find_lora_port(self.interface)
                 if not port:
                     raise serial.SerialException(
                         f"no '{self.interface}' LoRa device found; set [link] port. Ports: {available_ports_hint()}")
@@ -465,12 +481,12 @@ class SerialLink:
                 ser = serial.Serial(port, self.baud, timeout=self.read_timeout, write_timeout=1.0,
                                     exclusive=True)
                 ser.reset_input_buffer()
-            except (serial.SerialException, OSError) as e:
+            except Exception as e:
                 self.last_error = str(e)
                 if ser is not None:
                     try:
                         ser.close()
-                    except (serial.SerialException, OSError):
+                    except Exception:
                         pass
                 if not self._warned:
                     log.warning("LoRa device unavailable (%s); retrying every %.0fs", e, self.RETRY_INTERVAL_S)
@@ -487,7 +503,9 @@ class SerialLink:
             if ser is None:
                 return False
             try:
-                ser.write(data)
+                written = ser.write(data)
+                if written != len(data):
+                    raise serial.SerialException(f"short write ({written}/{len(data)} bytes)")
                 ser.flush()
                 return True
             except (serial.SerialException, OSError) as e:
@@ -503,10 +521,32 @@ class SerialLink:
                 read_timeout = self.read_timeout if timeout is None else timeout
                 if ser.timeout != read_timeout:
                     ser.timeout = read_timeout
-                return ser.read(ser.in_waiting or 1)
+                data = ser.read(ser.in_waiting or 1)
             except (serial.SerialException, OSError) as e:
                 self._drop(e)
                 return b""
+            if data:
+                self.rx_bytes += len(data)
+                self.last_rx = time.monotonic()
+            return data
+
+    def reconnect(self) -> bool:
+        """Closes the port so the next ensure_open() reopens it immediately.
+
+        Returns False if serial I/O was stuck; the port is then closed without the I/O lock
+        so that a blocked read or write is aborted.
+        """
+        got_lock = self.io_lock.acquire(timeout=self.RECONNECT_LOCK_TIMEOUT_S)
+        if not got_lock:
+            log.error("Serial I/O on %s is stuck; forcing the connection closed", self.port)
+        try:
+            self.close()
+            with self._lock:
+                self._next_attempt = 0.0
+        finally:
+            if got_lock:
+                self.io_lock.release()
+        return got_lock
 
     def close(self) -> None:
         with self._lock:
@@ -567,7 +607,7 @@ class LineSplitter:
 
 
 class Deduplicator:
-    """Remembers (session, seq) keys for a time window so burst copies are applied once."""
+    """Remembers command keys for a time window so burst copies are applied once."""
 
     def __init__(self, window_s: float = 120.0):
         self.window_s = window_s

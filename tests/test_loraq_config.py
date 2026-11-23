@@ -128,6 +128,20 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "boolean"):
             load_settings(self.path)
 
+    def test_station_diagnostic_log_defaults_off_and_validates(self):
+        self.parser.remove_option("station", "diagnostic_log")
+        self.save()
+        self.assertFalse(load_settings(self.path).station.diagnostic_log)
+        self.parser.set("station", "diagnostic_log", "true")
+        self.save()
+        settings = load_settings(self.path)
+        self.assertTrue(settings.station.diagnostic_log)
+        self.assertFalse(hasattr(settings.receiver, "diagnostic_log"))
+        self.parser.set("station", "diagnostic_log", "sometimes")
+        self.save()
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            load_settings(self.path)
+
     def test_receiver_audio_defaults_and_validation(self):
         for option in ("audio_enabled", "audio_volume"):
             self.parser.remove_option("receiver", option)
@@ -275,6 +289,7 @@ spec.loader.exec_module(tx)
 
 class Link:
     connected = True
+    rx_bytes = 0
     def __init__(self): self.written = []
     def ensure_open(self): return True
     def write(self, data): self.written.append(protocol.decode_frame(data)); return True
@@ -297,7 +312,7 @@ assert protocol.ack_window_s(50, 3) == (protocol.lora_toa_s(50) + protocol.ACK_G
                                          + 3 * protocol.ACK_SLOT_S + protocol.ACK_WINDOW_MARGIN_S)
 assert transmitter.tracker.slot_count() == 4
 assert SETTINGS.station.station_id == 'CAB_1' and SETTINGS.station.ack_slot == 2
-assert protocol.APP_VERSION == '1.0'
+assert protocol.APP_VERSION == '1.1'
 
 spec = importlib.util.spec_from_file_location('rx', 'LoRaQ-display.py')
 rx = importlib.util.module_from_spec(spec)
@@ -494,7 +509,11 @@ class AckTrackerTests(unittest.TestCase):
         _, _, state, label = tracker.snapshot()[-1]
         self.assertEqual(state, "NO_RESPONSE")
         self.assertIn("ONLINE v2.0", label)
-        self.assertIn("ACK MISSING", label)
+        self.assertIn("NO ACK", label)
+        tracker.on_online("STATION", "2.0", 0)
+        _, _, state, label = tracker.snapshot()[-1]
+        self.assertEqual(state, "NO_RESPONSE")
+        self.assertIn("NO ACK x1", label)
 
         tracker.open_window(16, "cue", time.monotonic() + 10)
         tracker.on_ack("STATION", "BE50", [16])

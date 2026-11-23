@@ -102,6 +102,25 @@ In `[receiver]`, there is an optional full-width top bar with the incoming comma
 show_tx_info = true
 ```
 
+### Diagnostic log
+
+To investigate missing ACKs or other radio problems, set `diagnostic_log = true` in `[station]` and restart the display. The same setting turns on the log for a transmitter, so it is defined once per device. It writes `loraq-display.log` next to `loraq.ini` (for the supplied service, `/home/loraq/`), rotating at 2 MB and keeping five older files (`loraq-display.log.1` to `.5`). Leave it off in normal use.
+
+```ini
+[station]
+diagnostic_log = true
+```
+
+The log is written by a separate thread, so a slow SD card cannot delay an ACK. In addition to the normal receive and ACK lines, with millisecond timestamps, it records:
+
+* **Every ACK and ONLINE heard from other stations**, with how long after the last command burst it arrived and where its slot predicts it should be (`+492 ms after burst 3/3 of Seq #1 (slot 1 expected ~362 ms)`). This shows the real ACK timing as this display hears it.
+* **How promptly this display sent its own ACK**: `ACK serviced +14 ms vs its slot time; serial write took 0 ms`. Large values mean the Pi was too busy or the serial write blocked.
+* **A health line every five minutes and at startup**: link up or down, bytes received from the dongle, cues, duplicate bursts and unreadable frames, ACKs heard and sent (and how many were late), plus system load, CPU temperature and Raspberry Pi power status (`UNDER-VOLTAGE NOW`, or `under-voltage since boot`) where the system exposes them.
+* **Display stalls**: `Display loop stalled for N ms`.
+* **A startup line** with versions, station, slot and timing settings, and a record of any thread crash.
+
+To collect the files, copy them off with `scp loraq@<address>:'/home/loraq/loraq-display.log*' .`. Log lines are written promptly, but a sudden power cut can lose the last few seconds. Stopping the service first (`sudo systemctl stop loraq-display.service`) avoids that. A missing log file after the display has started means the folder was not writable; the reason is shown in the console or `journalctl` output.
+
 --- 
 
 Speed up network startup:
