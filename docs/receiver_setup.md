@@ -4,7 +4,7 @@ The recommended receiver setup is a Raspberry Pi Zero with a Waveshare SX1262 ba
 
 These monitors are widely available as reverse cameras for vehicle use, generally the 10.1 inch versions include speakers and USB power out but smaller versions may not have sound or USB ports and only composite video input, so be careful when choosing. They run on 12v which can be useful in portable situations where they need to be battery powered (e.g. the cab of a steam locomotive) and draw around 300mA continuous including the Rpi and LoRa adapter so can be used with for example a 5Ah Li-ion battery pack to give well over 10 hours battery life for complete portability.  
 
-DietPi OS on the Raspberry Pi is recommended due to its optimised size and fast boot and the instructions below are based on this, but it will also run on standard Raspberry OS Lite. For best graphic performance given the low power of the Pi Zero, it is recommended to use an HDMI output resolution of 800 x 480 pixels.
+DietPi OS on the Raspberry Pi is recommended due to its optimised size and fast boot and the instructions below are based on this, but it will also run on standard Raspberry OS Lite. Rthe HDMI output resolution default setting is 1024x600 pixels, as 800x480 was found to cause a flickering display on some monitors.
 
 ## Receiver Setup & Pi Installation (`LoRaQ-display`)
 
@@ -102,6 +102,23 @@ In `[receiver]`, there is an optional full-width top bar with the incoming comma
 show_tx_info = true
 ```
 
+--- 
+
+Speed up network startup:
+
+```bash
+sudo systemctl mask ifupdown-pre.service
+sudo mkdir -p /etc/systemd/system/ifup@wlan0.service.d
+sudo tee /etc/systemd/system/ifup@wlan0.service.d/background.conf >/dev/null <<'EOF'
+[Unit]
+# An empty Before= clears the stock ordering, so nothing waits for this unit
+Before=
+
+[Service]
+TimeoutStartSec=60
+EOF
+sudo systemctl daemon-reload
+```
 
 ---
 
