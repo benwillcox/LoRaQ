@@ -76,19 +76,25 @@ PYTHON=python3.13 sh packaging/build-macos.sh
 
 ## Linux / Raspberry Pi
 
-Use a Pi/Linux environment with pygame, pyserial and python-osc installed.
+Install pygame and pyserial with apt, then install python-osc and PyInstaller
+in a virtual environment. Run these commands from the project root:
 
 ```bash
-sudo apt install binutils python3-venv python3-pygame python3-serial python3-pythonosc
+sudo apt install binutils python3-venv python3-pygame python3-serial
 sudo apt install "libpython$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-sh packaging/build-linux.sh
+python3 -m venv --system-site-packages build/linux-packaging-env
+build/linux-packaging-env/bin/python -m pip install python-osc pyinstaller
+PYTHON="$PWD/build/linux-packaging-env/bin/python" sh packaging/build-linux.sh
 ```
 
 The `libpython` package must match the Python version used to build.
+The virtual environment can access the apt-installed runtime dependencies;
+`python-osc` is installed there because it may not be available from apt.
 
-If PyInstaller is missing, the script creates and reuses `build/linux-env`, a
-virtual environment that can access the system-installed runtime dependencies.
-It installs PyInstaller there, not into the OS-managed Python installation.
+When using another Python environment that already has the runtime dependencies
+but lacks PyInstaller, the script creates and reuses `build/linux-env`, a virtual
+environment that can access system-installed runtime dependencies. It installs
+PyInstaller there, not into the OS-managed Python installation.
 
 If that environment is invalid, or pip reports `externally-managed-environment`
 while using it, move it aside from the project directory and retry:
