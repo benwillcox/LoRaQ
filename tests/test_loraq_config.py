@@ -77,6 +77,30 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(hasattr(SETTINGS.transmitter, "miss_alert_threshold"))
         self.assertFalse(self.parser.has_section("timing"))
 
+    def test_example_lists_all_supported_config_options(self):
+        supported_options = {
+            "radio": {
+                "baud_rate", "channel", "power", "network_id", "key", "spreading_factor",
+                "bandwidth_khz", "coding_rate", "preamble_symbols", "max_frame_bytes",
+            },
+            "link": {"interface", "port"},
+            "station": {"station_id", "ack_slot", "diagnostic_log"},
+            "transmitter": {
+                "audio_enabled", "osc_ip", "osc_port", "retries", "duty_cycle_limit_percent",
+                "max_dwell_time", "preview_width", "preview_height", "osc_forward_ip",
+                "osc_forward_port",
+            },
+            "receiver": {"audio_enabled", "show_tx_info"},
+            "web_push": {
+                "enabled", "url", "token", "push_remote", "timeout_s", "max_queue", "heartbeat_s",
+            },
+        }
+        for section, options in supported_options.items():
+            with self.subTest(section=section):
+                self.assertTrue(options.issubset(self.parser.options(section)))
+
+        self.assertTrue(self.parser.has_section("expected_stations"))
+
     def test_osc_port_default_and_override(self):
         settings = load_settings(Path(__file__).parent.parent / "loraq.ini")
         self.assertEqual(settings.transmitter.osc_port, 53070)
